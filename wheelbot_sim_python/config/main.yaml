@@ -1,0 +1,24 @@
+defaults:
+  - _self_
+  - algorithm: infoprop
+  - env: wheelbot
+  - eval: video_eval
+
+video_eval: false  # Set to true to run video evaluation instead of training
+
+seed: 6
+
+experiment: test
+wandb_project: "JAX_Mini_Wheelbot"
+wandb_run_id: null  # Set this to resume a specific wandb run
+agent_dir: "./data_transfer_test/policy"
+dataset_dir: "./data_transfer_test/env_dataset"
+metrics_dir: "./data_transfer_test/metrics"
+
+root_dir: "./exp"
+hydra:
+  run:
+    dir: ${root_dir}/${experiment}/${seed}/${now:%Y.%m.%d}/${now:%H%M%S}
+
+  sweep:
+    dir: ${root_dir}/${experiment}/${seed}/${now:%Y.%m.%d}/${now:%H%M%S}
