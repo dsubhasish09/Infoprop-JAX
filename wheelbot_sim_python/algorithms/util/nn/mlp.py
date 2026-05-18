@@ -1,0 +1,80 @@
+"""
+Generic MLP backbone used by the SAC actor, critic, and dynamics model.
+"""
+from typing import Callable, Optional, Sequence, Union, Any
+
+import flax.linen as nn
+import jax
+import jax.numpy as jnp
+from flax.core.frozen_dict import FrozenDict
+
+Initializer = Callable[..., Any]
+
+
+def torch_he_uniform(
+    in_axis: Union[int, Sequence[int]] = -2,
+    out_axis: Union[int, Sequence[int]] = -1,
+    batch_axis: Sequence[int] = (),
+    dtype=jnp.float_,
+    size_param: float = 1.0,
+):
+    "TODO: push to jax"
+    return jax.nn.initializers.variance_scaling(
+        0.3333 * size_param,
+        "fan_in",
+        "uniform",
+        in_axis=in_axis,
+        out_axis=out_axis,
+        batch_axis=batch_axis,
+        dtype=dtype,
+    )
+
+
+def _flatten_dict(x: Union[FrozenDict, jnp.ndarray]) -> jnp.ndarray:
+    if hasattr(x, "values"):
+        return jnp.concatenate([_flatten_dict(v) for k, v in sorted(x.items())], -1)
+    else:
+        return x
+
+
+def l2_normalization_activation(x: jax.Array) -> jax.Array:
+    return x / (jnp.linalg.norm(x, axis=-1, keepdims=True) + 1e-6)
+
+
+class MLP(nn.Module):
+    """Flax MLP module with configurable depth, width, and normalisation.
+
+    Used as the backbone for:
+      - SAC actor and Q-networks (no layer norm by default).
+      - Probabilistic ensemble dynamics model (layer norm enabled by default).
+
+    Attributes:
+        layer_sizes: Sequence of hidden layer widths followed by the output width.
+        activate_final: Whether to apply activation after the last layer.
+        layer_norm: Whether to apply LayerNorm after each hidden activation.
+        weight_norm: Whether to apply weight normalisation.
+        kernel_init: Weight initialiser (defaults to He uniform).
+    """
+
+    hidden_dims: Sequence[int]
+    activations: Callable[[jnp.ndarray], jnp.ndarray] = nn.elu
+    activate_final: int = False
+    scale_final: Optional[float] = None
+    dropout_rate: Optional[float] = None
+    add_weight_norm: bool = False
+    kernel_init: Initializer = jax.nn.initializers.lecun_uniform()
+    layer_norm: bool = False
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray, training: bool = False) -> jnp.ndarray:
+        x = _flatten_dict(x)
+
+        for i, size in enumerate(self.hidden_dims):
+            x = nn.Dense(size, kernel_init=self.kernel_init)(x)
+            if i + 1 < len(self.hidden_dims) or self.activate_final:
+                x = self.activations(x)
+                if self.layer_norm:
+                    x = nn.LayerNorm()(x)
+            if i + 2 == len(self.hidden_dims) and self.add_weight_norm:
+                x = l2_normalization_activation(x)
+        return x

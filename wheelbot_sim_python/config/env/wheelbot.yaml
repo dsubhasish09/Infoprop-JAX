@@ -1,0 +1,27 @@
+name: Wheelbot
+control_interval: 6  # MJX substeps per control step
+K_roll: [-1.3e0,  -1.6e-1,  -0.8e-04, -4e-04]
+K_pitch: [-400e-3, -40e-3, -4e-3,  -3e-3]
+action_lim: 0.5
+max_state: [2.7952, 0.7854, 0.7854, 1e2, 1e2, 1e2, !!float .inf, 1e4, !!float .inf, 1e4]
+
+action_scale: 0.2
+ct_weight: 2.5
+ca_weight: 2.5
+driving_weight: 10.0
+crash_penalty: -200.0
+rew_scale: 1e0
+
+min_log_var: ${algorithm.min_log_var}
+max_log_var: ${algorithm.max_log_var}
+
+# History parameters for model learning
+obs_history: 20
+act_history: 20
+lookahead: 30
+sin_cos_encoding: False
+
+# noise std order: [roll, pitch, yaw_rate, roll_rate, pitch_rate,
+#   drive_angle_rate, balance_angle_rate, body_vx, body_vy, body_vz, z]
+meas_noise_std: [2e-3, 2e-3, 2e-1, 2e-1, 2e-1, 2e-1, 2e-1, 2e-2, 2e-2, 2e-2, 1.2e-4]
+process_noise_std: [1e-3, 1e-3, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1e-2, 1e-2, 1e-2, 6e-5]

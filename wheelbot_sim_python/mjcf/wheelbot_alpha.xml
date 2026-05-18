@@ -1,0 +1,73 @@
+<mujoco>
+  <visual>
+    <global offwidth="640" offheight="640"/>
+  </visual>
+  <option gravity="0 0 -9.81"/>
+  <asset>
+		<mesh name="body" file="mesh/mujoco_simplified_body.stl"/>
+    <mesh name="wheel" file="mesh/actuator_rotor_simplified.stl"/>
+    <texture name="checker" type="2d" builtin="checker" width="8" height="8" rgb1="1 1 1" rgb2="0.7 0.7 0.7"/>
+    <material name="checker_mat" texture="checker" texrepeat="64 64" reflectance="0.2"/>
+	</asset>
+  <worldbody>
+    <body name="track" pos="0 0 0">
+    </body>
+    <geom name="ground" type="plane" size="8 8 0.1" material="checker_mat"/>
+    <body name ="body" pos="0 0 .0645" euler="0 0 0">
+      <inertial pos="0 0 0" mass="0.56939" diaginertia="6.439e-4 1.368e-3 1.012e-3"/>
+      <site name = "imu_1" pos = "-0.0234 -0.0204 0.01939" euler="180 0 90" type="box" size="0.0045 0.003 0.00095"/>
+      <site name = "imu_2" pos = "0.0234 0.0204 0.01939" euler="180 0 90" type="box" size="0.0045 0.003 0.00095"/>
+      <site name = "imu_3" pos = "-0.016427 0.020172 -0.01889" euler="0 0 90" type="box" size="0.0045 0.003 0.00095"/>
+      <site name = "imu_4" pos = "0.016368 -0.020481 -0.018916" euler="0 0 90" type="box" size="0.0045 0.003 0.00095"/>
+      <joint type="free"/>
+      <geom name="body_geom" type="mesh" mesh="body"/>
+      <body name ="wheel1" pos="0 0 -0.0325" euler="0 0 -90">
+        <inertial pos="0 0 0" mass="0.11002" diaginertia="8.852e-5 4.503e-5 4.503e-5"/> 
+        <joint name="w1" type="hinge" pos="0 0 0" axis="-1 0 0" damping="1.377e-4" frictionloss="8.061e-4"/>
+        <geom name="wheel_1_geom" type="mesh" mesh="wheel"/>
+      </body>
+      <body name ="wheel2" pos="0 0 0.0325" euler="0 0 0">
+        <inertial pos="0 0 0" mass="0.11002" diaginertia="8.852e-5 4.503e-5 4.503e-5"/>
+        <joint name="w2" type="hinge" pos="0 0 0" axis="1 0 0" damping="1.075e-4" frictionloss="1.198e-5"/>
+        <geom name="wheel_2_geom" type="mesh" mesh="wheel"/>
+      </body>
+      <light diffuse=".9 .9 .9" pos="0 0 5" dir="0 0 -1"/>
+      <camera name="floating" pos="-0.5 0 0.5" euler="0 -60 270" mode="track"/>
+      <camera name="fixed" pos="-0.5 0 0.4" euler="0 -60 270" mode="fixed"/>
+    </body>
+  
+    <!-- Wall 1: North -->
+    <!-- <geom name="wall_north" type="box" pos="0 1 0.15" size="1.05 0.05 0.15" rgba="0.5 0.5 0.5 1" friction="1 0.1 0.1"/> -->
+    <!-- Wall 2: South -->
+    <!-- <geom name="wall_south" type="box" pos="0 -1 0.15" size="1.05 0.05 0.15" rgba="0.5 0.5 0.5 1" friction="1 0.1 0.1"/> -->
+    <!-- Wall 3: East -->
+    <!-- <geom name="wall_east" type="box" pos="1 0 0.15" size="0.05 0.95 0.15" rgba="0.5 0.5 0.5 1" friction="1 0.1 0.1"/> -->
+    <!-- Wall 4: West -->
+    <!-- <geom name="wall_west" type="box" pos="-1 0 0.15" size="0.05 0.95 0.15" rgba="0.5 0.5 0.5 1" friction="1 0.1 0.1"/> -->
+  </worldbody>
+  <actuator>
+    <motor name="motor_1" joint="w1" gear="1" ctrlrange="-0.5 0.5"/>
+    <motor name="motor_2" joint="w2" gear="1" ctrlrange="-0.5 0.5"/>
+  </actuator>
+  <sensor>
+    <accelerometer name="acc_1" site="imu_1"/>
+    <accelerometer name="acc_2" site="imu_2"/>
+    <accelerometer name="acc_3" site="imu_3"/>
+    <accelerometer name="acc_4" site="imu_4"/>
+
+    <gyro name="gyr_1" site="imu_1"/>
+    <gyro name="gyr_2" site="imu_2"/>
+    <gyro name="gyr_3" site="imu_3"/>
+    <gyro name="gyr_4" site="imu_4"/>
+
+    <actuatorpos name="motor_1_pos" actuator="motor_1"/>
+    <actuatorpos name="motor_2_pos" actuator="motor_2"/>
+  </sensor>
+  <contact>
+    <exclude body1="wheel1" body2="wheel2"/>
+    <exclude body1="wheel1" body2="body"/>
+    <exclude body1="wheel2" body2="body"/>
+
+    <pair geom1="wheel_1_geom" geom2="ground" condim="6" friction="3.4515 3.4515 7.145e-4 2.147e-3 2.147e-3" solimp="0.9 0.95 0.001 0.5 2" solref="0.02 1"/>
+  </contact>
+</mujoco>
