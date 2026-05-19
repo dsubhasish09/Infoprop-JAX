@@ -76,9 +76,9 @@ wheelbot-racing/
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
-3. Create a virtual environment (Python 3.10):
+3. Create a virtual environment (Python 3.13):
    ```bash
-   uv venv --python 3.10
+   uv venv --python 3.13
    source .venv/bin/activate
    ```
 

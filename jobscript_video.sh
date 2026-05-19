@@ -21,4 +21,4 @@ module load FFmpeg
 
 export MUJOCO_GL=egl
 
-python -m wheelbot_sim_python.main video_eval=true eval.log_dir=exp/testing_ignore/26974/2026.05.18/204129 eval.track_seed=21  eval.iteration=12
+python -m wheelbot_sim_python.main video_eval=true eval.log_dir=exp/default_run_refactored/7566/2026.05.19/170614 eval.track_seed=21  eval.iteration=16
