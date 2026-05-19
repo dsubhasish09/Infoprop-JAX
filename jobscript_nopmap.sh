@@ -3,8 +3,8 @@
 
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
-#SBATCH --job-name=wheelbot_experiment
-#SBATCH --output=output_.out
+#SBATCH --job-name=wheelbot_experiment_nopmap
+#SBATCH --output=output_nopmap_.out
 #SBATCH --account=rwth2087
 #SBATCH --gres=gpu:1
 #SBATCH --time=01:30:00
@@ -18,7 +18,8 @@ module load FFmpeg
 export MUJOCO_GL=egl
 
 python -m wheelbot_sim_python.main \
-    experiment=testing_ignore \
+    algorithm=infoprop_nopmap \
+    experiment=testing_ignore_no_pmap \
     seed=$RANDOM \
     algorithm.num_model_envs=10000 \
     algorithm.grad_updates_per_model_step=10 \
@@ -27,8 +28,4 @@ python -m wheelbot_sim_python.main \
     algorithm.reset_model_per_trial=False \
     env.rew_scale=1.0 \
     algorithm.tau=0.005 \
-    algorithm.alpha=0.1 \
-    # algorithm.agent_learning_rate=3e-5 \
-    # algorithm.target_entropy=-3 \
-    # algorithm.tune_entropy=True
-
+    algorithm.alpha=0.1

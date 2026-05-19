@@ -9,10 +9,11 @@ Video evaluation:
     python -m wheelbot_sim_python.main video_eval=true eval.log_dir=... eval.iteration=3 eval.track_seed=42
 """
 
+import jax
 import omegaconf
 import hydra
 from wheelbot_sim_python.training_scripts.brax_infoprop_train import main as infoprop_main
-
+from wheelbot_sim_python.training_scripts.brax_infoprop_nopmap_train import main as infoprop_nopmap_main
 
 @hydra.main(config_path="config", config_name="main", version_base=None)
 def main(cfg: omegaconf.DictConfig):
@@ -21,6 +22,8 @@ def main(cfg: omegaconf.DictConfig):
         video_eval_run(cfg.eval)
     elif cfg.algorithm.name == 'infoprop':
         infoprop_main(cfg)
+    elif cfg.algorithm.name == 'infoprop_nopmap':
+        infoprop_nopmap_main(cfg)
     else:
         raise ValueError(f"Unsupported algorithm: {cfg.algorithm.name}")
 

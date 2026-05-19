@@ -264,7 +264,8 @@ def run(eval_cfg):
         envs.register_environment('_eval_model', ModelWheelbot)
         env_model = envs.get_environment(
             '_eval_model', cfg=env_cfg, visualize=True, track_seed=eval_cfg.track_seed,
-            min_log_var=algo_cfg.min_log_var, max_log_var=algo_cfg.max_log_var)
+            min_log_var=algo_cfg.min_log_var, max_log_var=algo_cfg.max_log_var,
+            fast_model_rollout=False)
         jit_step_model  = jax.jit(env_model.step)
         jit_reset_model = jax.jit(env_model.reset_with_init_robot_state_eval)
 
