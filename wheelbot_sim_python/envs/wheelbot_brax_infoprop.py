@@ -160,6 +160,9 @@ def get_projected_velocity(State):
 _VARIANT_INDICES = jp.array([1, 2, 3, 4, 5, 7, 9])
 _PITCH_CTRL_INDICES = jp.array([2, 5, 6, 7])
 _ROLL_CTRL_INDICES = jp.array([1, 4, 8, 9])
+# Physics-state column indices used in the model's odometry integration
+_EULER_RATE_IDX = jp.array([2, 5, 6])   # roll_dot, pitch_dot, yaw_dot
+_BODY_VEL_IDX   = jp.array([7, 8, 9])  # body vx, vy, vz
 
 WHEELBOT_ROOT_PATH = epath.Path(epath.resource_path('wheelbot_sim_python'))
 
@@ -586,13 +589,17 @@ class Wheelbot(PipelineEnv):
     return applied_torque, action_clipped
 
   def batched_model_step(
-      self, state, applied_torque, model, obs_mean, obs_std,
+      self, state, applied_torque, model_params, obs_mean, obs_std,
       next_state_delta_mean, next_state_delta_std, binning_entropy
   ):
     """Run one Infoprop Dyna step across the full ensemble.
 
     Queries all E ensemble members, computes precision-weighted fused posterior,
     epistemic variance, Kalman gain, and per-step conditional entropy.
+
+    Args:
+        model_params: plain params pytree (not a Flax TrainState); apply_fn is
+                      accessed via self._model_apply_fn.
 
     Output uncertainty quantities:
       - fused_var:    precision-weighted variance (inverse-variance pooling)
@@ -602,7 +609,8 @@ class Wheelbot(PipelineEnv):
       - conditional_var: (1 - K) * Sigma_GT, posterior variance after Kalman update
       - conditional_entropy: H(s_tilde), per-step information loss
 
-    Returns the fused next-state mean and the full uncertainty dict.
+    Returns:
+        (next_physics_state, rng, conditional_entropy, next_odom_state)
     """
     curr_physics_state = state.info['physics_state']
     curr_odom_state = state.info['invariant_physics_state']
@@ -612,22 +620,23 @@ class Wheelbot(PipelineEnv):
 
     model_input = jp.concatenate([physics_state_history, act_history], axis=-1)
 
-    means_, logvars_ = model.apply_fn(
-            {"params": model.params}, model_input, applied_torque, obs_mean, obs_std
+    means_, logvars_ = self._model_apply_fn(
+            {"params": model_params}, model_input, applied_torque, obs_mean, obs_std
         )
     # transform to output space
+    dt = self.dt
     VARS = jp.exp(logvars_)
-    vars_ = VARS * (next_state_delta_std + 1e-6) ** 2 * 0.006 ** 2
+    vars_ = VARS * (next_state_delta_std + 1e-6) ** 2 * dt ** 2
     R = jax.vmap(YRP)(curr_odom_state[:,0], curr_physics_state[:,0], curr_physics_state[:,1])[:,None, :,:]
-    vars__1 = (0.006/2) ** 2 * vars_[:,:,jp.array([2,5,6])]
+    vars__1 = (dt/2) ** 2 * vars_[:,:,_EULER_RATE_IDX]
     # x,y odom variance: integrate all body_vel components through rotation, take first 2 world rows
-    vars__2 = (0.006/2) ** 2 * (jp.square(R) @ vars_[:,:,jp.array([7,8,9]), None]).squeeze(-1)[:,:,:2]
+    vars__2 = (dt/2) ** 2 * (jp.square(R) @ vars_[:,:,_BODY_VEL_IDX, None]).squeeze(-1)[:,:,:2]
     vars__ = jp.concatenate((vars__1, vars__2), axis=-1)
     vars = jp.concatenate((vars_, vars__), axis=-1)
-    means_ = (means_ * (next_state_delta_std + 1e-6) + next_state_delta_mean) * 0.006 + curr_physics_state[:, None, :]
-    means__1 = curr_odom_state[:,None, 0:3] + 0.006 * (curr_physics_state[:,jp.array([2,5,6])][:,None,:] + means_[:,:,jp.array([2,5,6])]) / 2
+    means_ = (means_ * (next_state_delta_std + 1e-6) + next_state_delta_mean) * dt + curr_physics_state[:, None, :]
+    means__1 = curr_odom_state[:,None, 0:3] + dt * (curr_physics_state[:,_EULER_RATE_IDX][:,None,:] + means_[:,:,_EULER_RATE_IDX]) / 2
     # x,y integration only; z is now directly predicted by the model at physics_state index 10
-    means__2 = curr_odom_state[:,None, 3:5] + 0.006 * (R @ curr_physics_state[:,jp.array([7,8,9])][:,None,:, None] + R @ means_[:,:,jp.array([7,8,9])][:,:,:,None]).squeeze(-1)[:,:,:2] / 2
+    means__2 = curr_odom_state[:,None, 3:5] + dt * (R @ curr_physics_state[:,_BODY_VEL_IDX][:,None,:, None] + R @ means_[:,:,_BODY_VEL_IDX][:,:,:,None]).squeeze(-1)[:,:,:2] / 2
     means__ = jp.concatenate((means__1, means__2), axis=-1)
     means = jp.concatenate((means_, means__), axis=-1)
 
@@ -720,40 +729,24 @@ class Wheelbot(PipelineEnv):
      phys_history = jp.concatenate([curr_phys_history[11:], to_add])
      return phys_history
   
-  def step(self, state: State, action: jp.ndarray) -> State:
-    """Advance the environment by one step using the learned dynamics model.
+  def _step_with_torque(self, state: State, applied_torque: jp.ndarray, rl_action: jp.ndarray) -> State:
+    """Shared implementation for step() and direct_step().
 
-    Applies the RL action through the balancing prior, runs the InfoProp ensemble step,
-    checks entropy-based termination, and returns the updated Brax State.
+    Runs the InfoProp model prediction, updates histories and info dict, computes
+    reward and entropy-based termination. `applied_torque` is the torque sent to the
+    model; `rl_action` is the RL action used for observation/reward computation.
     """
-    obs = state.obs
     track_seed = state.info['track_seed']
-    robot_state = obs[self._obs_slice_start:]
-    action_clipped = jp.clip(action, -1, 1)
-    driving_wheel_torque = -self.K_pitch @ robot_state[_PITCH_CTRL_INDICES]
-    balancing_wheel_torque = -self.K_roll @ robot_state[_ROLL_CTRL_INDICES]
-
-    LC_torque = jp.array([driving_wheel_torque, balancing_wheel_torque])
-    applied_torque = jp.clip(self.action_scale * action_clipped + LC_torque, -self.action_lim, self.action_lim)
-
     binning_entropy = state.info['binning_entropy']
     next_physics_state, rng, conditional_entropy, next_odom_state, kalman_gain, conditional_var, fused_var, fused_mean, epist_var = self.model_step(state, applied_torque, binning_entropy)
 
-
-
     data, obs = self._get_model_data_and_obs(
-        state, next_physics_state, next_odom_state, action_clipped, track_seed
+        state, next_physics_state, next_odom_state, rl_action, track_seed
     )
 
     info = state.info
-    
-    # Update history arrays using shift function
-    updated_phys_history = self.shift_phys(info['phys_state_history'], next_physics_state)
-    info['phys_state_history'] = updated_phys_history
-
-    updated_act_history = self.shift_action(info['act_history'], applied_torque)
-    info['act_history'] = updated_act_history
-    
+    info['phys_state_history'] = self.shift_phys(info['phys_state_history'], next_physics_state)
+    info['act_history'] = self.shift_action(info['act_history'], applied_torque)
     info['applied_torque'] = applied_torque
     info['physics_state'] = next_physics_state
     info['rng'] = rng
@@ -766,112 +759,77 @@ class Wheelbot(PipelineEnv):
     info['fused_mean'] = fused_mean
     info['epist_var'] = epist_var
 
-    state = state.replace(obs=obs, info=info , pipeline_state=data)
-    reward, done, reward_metrics = self._get_rew(state, action_clipped)
+    state = state.replace(obs=obs, info=info, pipeline_state=data)
+    reward, done, reward_metrics = self._get_rew(state, rl_action)
     info['reward_metrics'] = reward_metrics
 
-    done = jp.where((conditional_entropy > state.info['per_step_cutoff']).any(), 1.0, done) #if the model is uncertain, then done
-
+    done = jp.where((conditional_entropy > state.info['per_step_cutoff']).any(), 1.0, done)
     done = jp.where((state.info['accumulated_conditional_entropy'] > state.info['accumulated_cutoff']).any(), 1.0, done)
 
-    return state.replace(
-        reward=reward, done=done, info=info
-    )
-  
+    return state.replace(reward=reward, done=done, info=info)
+
+  def step(self, state: State, action: jp.ndarray) -> State:
+    """Advance the environment by one step using the learned dynamics model.
+
+    Applies the RL action through the balancing prior, runs the InfoProp ensemble step,
+    checks entropy-based termination, and returns the updated Brax State.
+    """
+    robot_state = state.obs[self._obs_slice_start:]
+    action_clipped = jp.clip(action, -1, 1)
+    driving_wheel_torque = -self.K_pitch @ robot_state[_PITCH_CTRL_INDICES]
+    balancing_wheel_torque = -self.K_roll @ robot_state[_ROLL_CTRL_INDICES]
+    LC_torque = jp.array([driving_wheel_torque, balancing_wheel_torque])
+    applied_torque = jp.clip(self.action_scale * action_clipped + LC_torque, -self.action_lim, self.action_lim)
+    return self._step_with_torque(state, applied_torque, action_clipped)
+
   def direct_step(self, state: State, action: jp.ndarray) -> State:
     """Variant of step used directly by the SAC agent (bypasses control-law splitting)."""
-    obs = state.obs
-    track_seed = state.info['track_seed']
-    # robot_state = obs[2 * lookahead + 2:]
-    # action_clipped = jp.clip(action, -1, 1) 
-    # driving_wheel_torque = -self.K_pitch @ (robot_state[tuple([[2, 5, 6, 7 ]])]) 
-    # balancing_wheel_torque =  -self.K_roll @ (robot_state[tuple([[1, 4, 8, 9]])]) 
-    
-    # LC_torque = jp.array([driving_wheel_torque, balancing_wheel_torque])
-    # applied_torque = jp.clip( self.action_scale * action_clipped + LC_torque, -self.action_lim, self.action_lim)
-
-    binning_entropy = state.info['binning_entropy']
-    next_physics_state, rng, conditional_entropy, next_odom_state, kalman_gain, conditional_var, fused_var, fused_mean, epist_var = self.model_step(state, action, binning_entropy)
-
-
-
-    data, obs = self._get_model_data_and_obs(
-        state, next_physics_state, next_odom_state, action, track_seed
-    )
-
-    info = state.info
-    
-    # Update history arrays using shift function
-    updated_phys_history = self.shift_phys(info['phys_state_history'], next_physics_state)
-    info['phys_state_history'] = updated_phys_history
-
-    updated_act_history = self.shift_action(info['act_history'], action)
-    info['act_history'] = updated_act_history
-    
-    info['applied_torque'] = action
-    info['physics_state'] = next_physics_state
-    info['rng'] = rng
-    info['accumulated_conditional_entropy'] = state.info['accumulated_conditional_entropy'] + conditional_entropy
-    info['invariant_physics_state'] = next_odom_state
-    info['current_conditional_entropy'] = conditional_entropy
-    info['kalman_gain'] = kalman_gain
-    info['conditional_var'] = conditional_var
-    info['fused_var'] = fused_var
-    info['fused_mean'] = fused_mean
-    info['epist_var'] = epist_var
-
-    state = state.replace(obs=obs, info=info , pipeline_state=data)
-    reward, done, reward_metrics = self._get_rew(state, action)
-    info['reward_metrics'] = reward_metrics
-
-    done = jp.where((conditional_entropy > state.info['per_step_cutoff']).any(), 1.0, done) #if the model is uncertain, then done
-
-    done = jp.where((state.info['accumulated_conditional_entropy'] > state.info['accumulated_cutoff']).any(), 1.0, done)
-
-    return state.replace(
-        reward=reward, done=done, info=info
-    )
+    return self._step_with_torque(state, action, action)
   
   
   def model_step(self, state, action, binning_entropy):
     """Single Infoprop ensemble prediction for one (obs, action) pair.
 
-    Returns fused_mean, fused_var, epist_var, kalman_gain, conditional_var,
-    conditional_entropy, and binning_entropy.
+    Extracts model_params from state.info['model'] and calls self._model_apply_fn.
+
+    Returns:
+        (next_physics_state, rng, conditional_entropy, next_odom_state,
+         kalman_gain, conditional_var, fused_var, fused_mean, epist_var)
     """
-    model = state.info['model']
+    model_params = state.info['model']
     obs_mean = state.info['model_obs_mean']
     obs_std = state.info['model_obs_std']
     next_state_delta_mean = state.info['next_state_delta_mean']
     next_state_delta_std = state.info['next_state_delta_std']
     curr_physics_state = state.info['physics_state']
     curr_odom_state = state.info['invariant_physics_state']
-    curr_rng, rng = jax.random.split(state.info['rng']) #jax.random.split(state.info.get('rng', jax.random.PRNGKey(0)))
+    curr_rng, rng = jax.random.split(state.info['rng'])
     physics_state_history = state.info['phys_state_history']
     act_history = state.info['act_history']
     model_input = jp.concatenate([physics_state_history, act_history], axis=-1)
-    means_, logvars_ = model.apply_fn(
-            {"params": model.params}, model_input, action, obs_mean, obs_std
+    means_, logvars_ = self._model_apply_fn(
+            {"params": model_params}, model_input, action, obs_mean, obs_std
         )
     vars_ = jp.exp(logvars_) * (next_state_delta_std + 1e-6) ** 2 * self.dt ** 2
     
     means_ = (means_ * (next_state_delta_std + 1e-6) + next_state_delta_mean) * self.dt + curr_physics_state
-    means__1 = curr_odom_state[None,0:3] + self.dt * (curr_physics_state[None,jp.array([2,5,6])]+means_[:, jp.array([2,5,6])])/2
+    means__1 = curr_odom_state[None,0:3] + self.dt * (curr_physics_state[None,_EULER_RATE_IDX]+means_[:, _EULER_RATE_IDX])/2
     # R = RZ(means__1[:,0]) @ RX(means_[:,0]) @ RY(means_[:,1])
     R = jax.vmap(YRP)(curr_odom_state[None, 0], curr_physics_state[None, 0], curr_physics_state[None, 1])
     # x,y integration only; z is now directly predicted by the model at physics_state index 10
-    means__2 = curr_odom_state[None, 3:5] + self.dt * (R @ curr_physics_state[None, jp.array([7,8,9]), None] + R @ means_[:,jp.array([7,8,9]),None]).squeeze(axis=-1)[:,:2]/2
+    means__2 = curr_odom_state[None, 3:5] + self.dt * (R @ curr_physics_state[None, _BODY_VEL_IDX, None] + R @ means_[:,_BODY_VEL_IDX,None]).squeeze(axis=-1)[:,:2]/2
     means__ = jp.concatenate((means__1, means__2), axis=-1)
     means = jp.concatenate((means_, means__), axis=-1)
 
-    vars__1 = (self.dt/2) ** 2 * vars_[:,jp.array([2,5,6])]
+    vars__1 = (self.dt/2) ** 2 * vars_[:,_EULER_RATE_IDX]
     # x,y variance only from body_vel propagation; z variance comes from model directly
-    vars__2 = (self.dt/2) ** 2 * (jp.square(R) @ vars_[:,jp.array([7,8,9]),None]).squeeze(-1)[:,:2]
+    vars__2 = (self.dt/2) ** 2 * (jp.square(R) @ vars_[:,_BODY_VEL_IDX,None]).squeeze(-1)[:,:2]
     vars__ = jp.concatenate((vars__1, vars__2), axis=-1)
     vars = jp.concatenate((vars_, vars__), axis=-1)
 
-    fused_var = 1/jp.mean(1/(vars+1e-12), axis=0)
-    fused_mean = fused_var * jp.mean(means / (vars+1e-12), axis=0)
+    inv_vars = 1 / (vars + 1e-12)
+    fused_var = 1 / jp.mean(inv_vars, axis=0)
+    fused_mean = fused_var * jp.mean(means * inv_vars, axis=0)
     epist_var = jp.mean((means - fused_mean[None,:]) ** 2, axis=0)
     kalman_gain = jp.clip((fused_var) / (fused_var + epist_var), 0, 1)
     conditional_var = ((1 - kalman_gain) * fused_var)
@@ -883,7 +841,12 @@ class Wheelbot(PipelineEnv):
     return next_physics_state, rng, conditional_entropy, next_odom_state, kalman_gain, conditional_var, fused_var, fused_mean, epist_var
 
   def init_NN_trainer(self, seed, learning_rate, weight_decay, hidden_layer_sizes, model_layer_norm):
-    """Instantiate and return a ModelTrainer for the ensemble dynamics model."""
+    """Instantiate and return a ModelTrainer for the ensemble dynamics model.
+
+    Note: the caller must set ``self._model_apply_fn = model_state.apply_fn``
+    (where model_state is returned by trainer.init()) after calling this method;
+    it is not set here.
+    """
     model_trainer = ModelTrainer(
       seed=seed,
       observation_size=(11),

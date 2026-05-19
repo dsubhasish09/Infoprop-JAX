@@ -51,7 +51,9 @@ Transition = types.Transition
 
 ReplayBufferState = Any
 
-_PMAP_AXIS_NAME = 'i'
+# Physics-state column indices shared by get_cutoffs and the model environments
+_EULER_RATE_IDX = jnp.array([2, 5, 6])   # roll_dot, pitch_dot, yaw_dot
+_BODY_VEL_IDX   = jnp.array([7, 8, 9])  # body vx, vy, vz
 
 @flax.struct.dataclass
 class TrainingState:
@@ -59,7 +61,7 @@ class TrainingState:
 
   Bundles SAC network parameters (policy, Q, alpha), the learned dynamics model,
   running-statistics normalizer, and normalisation constants for model inputs/outputs.
-  Replicated across devices via pmap.
+  Kept on a single device.
   """
 
   policy_optimizer_state: optax.OptState
@@ -109,7 +111,8 @@ def YRP(yaw, roll, pitch):
    return Rz(yaw) @ Rx(roll) @ Ry(pitch)
 
 def _unpmap(v):
-    return jax.tree_util.tree_map(lambda x: x[0], v)
+    """No-op: retained for structural symmetry; there is no device axis to strip."""
+    return v
 
 def tree_where(condition, v1, v2):
     """
@@ -124,7 +127,7 @@ def tree_repeat(v, n):
    """
    Repeats the elements of a pytree n times.
    """
-   return jax.tree_util.tree_map(lambda x: jnp.repeat(jnp.expand_dims(jnp.expand_dims(x, 0), 0), n, axis=0), v)
+   return jax.tree_util.tree_map(lambda x: jnp.repeat(jnp.expand_dims(x, 0), n, axis=0), v)
 
 def _init_training_state(
     key: PRNGKey,
@@ -143,7 +146,7 @@ def _init_training_state(
     normalizer_params: Optional[running_statistics.RunningStatisticsState] = None,
     initial_log_alpha: float = 0.0,
 ) -> TrainingState:
-  """Initialise and pmap-replicate the full TrainingState across all devices."""
+  """Initialise the full TrainingState for a single-device JIT training loop."""
   key_policy, key_q = jax.random.split(key)
   log_alpha = jnp.asarray(initial_log_alpha, dtype=jnp.float32)
   alpha_optimizer_state = alpha_optimizer.init(log_alpha)
@@ -174,10 +177,7 @@ def _init_training_state(
         next_state_delta_mean=next_state_delta_mean,
         next_state_delta_std=next_state_delta_std,
   )
-  devices = jax.local_devices()[:local_devices_to_use]
-  return jax.tree_util.tree_map(
-      lambda x: jnp.stack([x] * len(devices)), training_state
-  )
+  return training_state
 
 def train(
     environment,
@@ -257,12 +257,10 @@ def train(
   """
 #   jax.config.update("jax_log_compiles", True)
   process_id = jax.process_index()
-  local_devices_to_use = jax.local_device_count()
-  if max_devices_per_host is not None:
-    local_devices_to_use = min(local_devices_to_use, max_devices_per_host)
-  device_count = local_devices_to_use * jax.process_count()
+  local_devices_to_use = 1
+  device_count = 1
   logging.info(
-      'local_device_count: %s; total_device_count: %s',
+      'single-device mode; local_device_count: %s; total_device_count: %s',
       local_devices_to_use,
       device_count,
   )
@@ -292,7 +290,7 @@ def train(
       v_randomization_fn = functools.partial(
           randomization_fn,
           rng=jax.random.split(
-              key, num_envs // jax.process_count() // local_devices_to_use
+              key, num_envs
           ),
       )
 
@@ -351,13 +349,13 @@ def train(
       target_entropy=target_entropy,
   )
   alpha_update = gradients.gradient_update_fn(  # pytype: disable=wrong-arg-types  # jax-ndarray
-      alpha_loss, alpha_optimizer, pmap_axis_name=_PMAP_AXIS_NAME, has_aux=True
+      alpha_loss, alpha_optimizer, pmap_axis_name=None, has_aux=True
   )
   critic_update = gradients.gradient_update_fn(  # pytype: disable=wrong-arg-types  # jax-ndarray
-      critic_loss, q_optimizer, pmap_axis_name=_PMAP_AXIS_NAME
+      critic_loss, q_optimizer, pmap_axis_name=None
   )
   actor_update = gradients.gradient_update_fn(  # pytype: disable=wrong-arg-types  # jax-ndarray
-      actor_loss, policy_optimizer, pmap_axis_name=_PMAP_AXIS_NAME
+      actor_loss, policy_optimizer, pmap_axis_name=None
   )
   
   # Initializing replay buffers
@@ -420,6 +418,9 @@ def train(
 
   model_state, _, model_obs_mean, model_obs_std, next_state_delta_mean, next_state_delta_std, local_key = model_trainer.init(local_key)
   _initial_model_state = model_state
+  # Store the apply_fn on the env instance; it's a static function reference
+  # that never changes, so it must not be carried in the scan state.
+  model_environment._model_apply_fn = model_state.apply_fn
 
 
   def model_sgd_step(
@@ -481,7 +482,7 @@ def train(
         next_state_delta_std=next_state_delta_std,
     )
     return training_state
-  update_stats = jax.pmap(update_stats, axis_name=_PMAP_AXIS_NAME)
+  update_stats = jax.jit(update_stats)
       
 
   def model_training_step(
@@ -564,7 +565,7 @@ def train(
 
     return training_state, best_training_state, loss, steps_since_last_improvement, losses
    
-  model_training_step = jax.pmap(model_training_step, axis_name=_PMAP_AXIS_NAME)
+  model_training_step = jax.jit(model_training_step)
 
 
   def run_model_eval(
@@ -593,7 +594,7 @@ def train(
         key,
     )
     return training_state, loss
-  run_model_eval = jax.pmap(run_model_eval, axis_name=_PMAP_AXIS_NAME)
+  run_model_eval = jax.jit(run_model_eval)
 
   def model_training_loop(
       training_state: TrainingState,
@@ -605,16 +606,14 @@ def train(
     """Orchestrate model training epochs, tracking the best validation loss."""
 
     key, eval_key = jax.random.split(key)
-    training_state, loss = run_model_eval(
-        training_state, validation_transitions, jax.random.split(eval_key, local_devices_to_use)
-    )
+    training_state, loss = run_model_eval(training_state, validation_transitions, eval_key)
     logging.info('Initial validation loss: %s', loss)
-    best_training_state, loss, steps_since_last_improvement = training_state, jnp.array([loss]*local_devices_to_use), jnp.array([jnp.array([0])]*local_devices_to_use)
+    best_training_state, loss, steps_since_last_improvement = training_state, loss, jnp.array(0)
 
     for i in range(max_iterations):
         key, step_key = jax.random.split(key)
         training_state, best_training_state, loss, steps_since_last_improvement, losses = model_training_step(
-            training_state, training_transitions, validation_transitions, jax.random.split(step_key, local_devices_to_use), best_training_state, loss, steps_since_last_improvement
+            training_state, training_transitions, validation_transitions, step_key, best_training_state, loss, steps_since_last_improvement
         )
         # logging.info('Losses: %s', losses)
         if steps_since_last_improvement is not None and steps_since_last_improvement >= patience:
@@ -654,19 +653,20 @@ def train(
     means_, logvars_ = model_.apply_fn(
             {"params": model_.params}, model_dataset_val.observation, applied_torque, model_obs_mean, model_obs_std
         )
-    # Rescale model output variances to physical units (undo normalisation, apply dt=0.006)
+    # Rescale model output variances to physical units (undo normalisation, apply dt)
+    dt = model_environment.dt
     VARS = jnp.exp(logvars_)
-    vars_ = VARS * (next_state_delta_std + 1e-6) ** 2 * 0.006 ** 2
+    vars_ = VARS * (next_state_delta_std + 1e-6) ** 2 * dt ** 2
     R = jax.vmap(YRP)(curr_odom_state[:,0], curr_physics_state[:,0], curr_physics_state[:,1])[:,None, :,:]
-    vars__1 = (0.006/2) ** 2 * vars_[:,:,jnp.array([2,5,6])]
+    vars__1 = (dt/2) ** 2 * vars_[:,:,_EULER_RATE_IDX]
     # x,y variance from body_vel propagation; z variance comes from model directly at index 10
-    vars__2 = (0.006/2) ** 2 * (jnp.square(R) @ vars_[:,:,jnp.array([7,8,9]), None]).squeeze(-1)[:,:,:2]
+    vars__2 = (dt/2) ** 2 * (jnp.square(R) @ vars_[:,:,_BODY_VEL_IDX, None]).squeeze(-1)[:,:,:2]
     vars__ = jnp.concatenate((vars__1, vars__2), axis=-1)
     vars = jnp.concatenate((vars_, vars__), axis=-1)
-    means_ = (means_ * (next_state_delta_std + 1e-6) + next_state_delta_mean) * 0.006 + curr_physics_state[:, None, :]
-    means__1 = curr_odom_state[:,None, 0:3] + 0.006 * (curr_physics_state[:,jnp.array([2,5,6])][:,None,:] + means_[:,:,jnp.array([2,5,6])]) / 2
+    means_ = (means_ * (next_state_delta_std + 1e-6) + next_state_delta_mean) * dt + curr_physics_state[:, None, :]
+    means__1 = curr_odom_state[:,None, 0:3] + dt * (curr_physics_state[:,_EULER_RATE_IDX][:,None,:] + means_[:,:,_EULER_RATE_IDX]) / 2
     # x,y integration only; z is now directly predicted by the model at physics_state index 10
-    means__2 = curr_odom_state[:,None, 3:5] + 0.006 * (R @ curr_physics_state[:,jnp.array([7,8,9])][:,None,:, None] + R @ means_[:,:,jnp.array([7,8,9])][:,:,:,None]).squeeze(-1)[:,:,:2] / 2
+    means__2 = curr_odom_state[:,None, 3:5] + dt * (R @ curr_physics_state[:,_BODY_VEL_IDX][:,None,:, None] + R @ means_[:,:,_BODY_VEL_IDX][:,:,:,None]).squeeze(-1)[:,:,:2] / 2
     means__ = jnp.concatenate((means__1, means__2), axis=-1)
     means = jnp.concatenate((means_, means__), axis=-1)
 
@@ -692,7 +692,7 @@ def train(
 
     return per_step_cutoff, accumulated_cutoff, binning_entropy
   
-  get_cutoffs = jax.pmap(get_cutoffs, axis_name=_PMAP_AXIS_NAME)
+  get_cutoffs = jax.jit(get_cutoffs)
 
   def model_actor_step(
     model_env: Env,
@@ -795,7 +795,6 @@ def train(
     normalizer_params = running_statistics.update(
         normalizer_params,
         transitions.observation,
-        pmap_axis_name=_PMAP_AXIS_NAME,
     )
     
     buffer_state = replay_buffer.insert(buffer_state, transitions)
@@ -824,7 +823,6 @@ def train(
     normalizer_params = running_statistics.update(
         normalizer_params,
         transitions.observation,
-        pmap_axis_name=_PMAP_AXIS_NAME,
     )
     
     buffer_state = replay_buffer.insert(buffer_state, transitions)
@@ -865,9 +863,7 @@ def train(
         length=num_prefill_real_actor_steps,
     )[0]
 
-  prefill_replay_buffer = jax.pmap(
-      prefill_replay_buffer, axis_name=_PMAP_AXIS_NAME
-  )
+  prefill_replay_buffer = jax.jit(prefill_replay_buffer)
 
   def random_prefill_replay_buffer(
       training_state: TrainingState,
@@ -903,9 +899,7 @@ def train(
         length=num_prefill_real_actor_steps,
     )[0]
 
-  random_prefill_replay_buffer = jax.pmap(
-      random_prefill_replay_buffer, axis_name=_PMAP_AXIS_NAME
-  )
+  random_prefill_replay_buffer = jax.jit(random_prefill_replay_buffer)
   
   def get_model_based_experience(
       normalizer_params: running_statistics.RunningStatisticsState,
@@ -928,7 +922,6 @@ def train(
     normalizer_params = running_statistics.update(
         normalizer_params,
         model_transitions.observation,
-        pmap_axis_name=_PMAP_AXIS_NAME,
     )
 
     model_buffer_state = model_replay_buffer.insert(model_buffer_state, model_transitions)
@@ -965,9 +958,7 @@ def train(
         length=num_prefill_actor_steps,
     )[0]
 
-  fill_model_replay_buffer = jax.pmap(
-      fill_model_replay_buffer, axis_name=_PMAP_AXIS_NAME
-  )
+  fill_model_replay_buffer = jax.jit(fill_model_replay_buffer)
 
   def agent_sgd_step(
       carry: Tuple[TrainingState, PRNGKey], transitions: Transition
@@ -1065,24 +1056,44 @@ def train(
   ]:
     """Collect one batch of model rollouts and perform `grad_updates_per_model_step` SAC updates."""
     experience_key, training_key = jax.random.split(key)
+
+    # Extract model params from the env state before the scan so they are
+    # captured as a closure constant rather than carried as mutable loop state.
+    # This prevents XLA from including ~34 MB of params in the scan carry for
+    # every one of the num_training_steps_per_model_train iterations.
+    _model_params = model_env_state.info['model']
+    _lean_info = {k: v for k, v in model_env_state.info.items() if k != 'model'}
+    _lean_env_state = model_env_state.replace(info=_lean_info)
+
     def f(carry, unused):
-        normalizer_params, policy_params, model_env_state, model_buffer_state, experience_key = carry
+        normalizer_params, policy_params, lean_env_state, model_buffer_state, experience_key = carry
         experience_key, new_key = jax.random.split(experience_key)
-        new_normalizer_params, model_env_state, model_buffer_state = get_model_based_experience(
+        # Temporarily inject model params (from closure) for the step function.
+        full_info = dict(lean_env_state.info)
+        full_info['model'] = _model_params
+        full_env_state = lean_env_state.replace(info=full_info)
+        new_normalizer_params, full_env_state, model_buffer_state = get_model_based_experience(
             normalizer_params,
             policy_params,
-            model_env_state,
+            full_env_state,
             model_buffer_state,
             experience_key,
         )
-        return (new_normalizer_params, policy_params, model_env_state, model_buffer_state, new_key), ()
-    
-    (normalizer_params, _, model_env_state, model_buffer_state, _), _ = jax.lax.scan(
+        # Strip model params from the output carry.
+        lean_info_out = {k: v for k, v in full_env_state.info.items() if k != 'model'}
+        lean_env_state_out = full_env_state.replace(info=lean_info_out)
+        return (new_normalizer_params, policy_params, lean_env_state_out, model_buffer_state, new_key), ()
+
+    (normalizer_params, _, _lean_env_state, model_buffer_state, _), _ = jax.lax.scan(
         f,
-        (training_state.normalizer_params, training_state.policy_params, model_env_state, model_buffer_state, experience_key),
+        (training_state.normalizer_params, training_state.policy_params, _lean_env_state, model_buffer_state, experience_key),
         (),
         length=num_training_steps_per_model_train,
     )
+    # Reattach model params so the returned state matches the caller's expectation.
+    final_info = dict(_lean_env_state.info)
+    final_info['model'] = _model_params
+    model_env_state = _lean_env_state.replace(info=final_info)
     
     training_state = training_state.replace(
         normalizer_params=normalizer_params,
@@ -1127,7 +1138,7 @@ def train(
     metrics = jax.tree_util.tree_map(jnp.mean, metrics)
     return training_state, model_env_state, model_buffer_state, metrics
 
-  agent_training_epoch = jax.pmap(agent_training_epoch, axis_name=_PMAP_AXIS_NAME)
+  agent_training_epoch = jax.jit(agent_training_epoch)
 
   def _reset_agent_params(training_state: TrainingState) -> TrainingState:
     """Restore SAC agent fields to their original initial values."""
@@ -1141,7 +1152,7 @@ def train(
         alpha_optimizer_state=_initial_alpha_optimizer_state,
     )
 
-  _reset_agent_params = jax.pmap(_reset_agent_params, axis_name=_PMAP_AXIS_NAME)
+  _reset_agent_params = jax.jit(_reset_agent_params)
 
   def _reset_model_params(training_state: TrainingState) -> TrainingState:
     """Re-initialise only the ensemble model fields of training_state on-device."""
@@ -1149,8 +1160,8 @@ def train(
         model_state=_initial_model_state,
     )
 
-  _reset_model_params = jax.pmap(_reset_model_params, axis_name=_PMAP_AXIS_NAME)
-  _reset_model_buffer = jax.pmap(model_replay_buffer.init)
+  _reset_model_params = jax.jit(_reset_model_params)
+  _reset_model_buffer = jax.jit(model_replay_buffer.init)
 
   def agent_training_step_with_resampling(
       training_state: TrainingState,
@@ -1172,9 +1183,8 @@ def train(
         model_env_state = unused
 
         epoch_key, key = jax.random.split(key)
-        epoch_keys = jax.random.split(epoch_key, local_devices_to_use)
         training_state, model_env_state, model_buffer_state, metrics = agent_training_epoch(
-            training_state, model_env_state, model_buffer_state, epoch_keys
+            training_state, model_env_state, model_buffer_state, epoch_key
         )
         metrics['average_rollout_length'] =(model_env_state.info["total_done_steps"] / model_env_state.info["num_inits"] + jnp.sum((1-model_env_state.done)*model_env_state.info["steps"]) / jnp.sum(1-model_env_state.done))
         return (training_state, model_buffer_state, key), metrics
@@ -1226,9 +1236,8 @@ def train(
     """
     Collects real experience using the current policy.
     """
-    prefill_keys = jax.random.split(prefill_key, local_devices_to_use)
     training_state, env_state, buffer_state, physics_buffer_state, _ = prefill_replay_buffer(
-        training_state, env_state, buffer_state, physics_buffer_state, prefill_keys
+        training_state, env_state, buffer_state, physics_buffer_state, prefill_key
     ) 
     return training_state, env_state, buffer_state, physics_buffer_state
   
@@ -1236,9 +1245,8 @@ def train(
     """
     Collects random experience using a random policy.
     """
-    prefill_keys = jax.random.split(prefill_key, local_devices_to_use)
     training_state, env_state, buffer_state, physics_buffer_state, _ = random_prefill_replay_buffer(
-        training_state, env_state, buffer_state, physics_buffer_state, prefill_keys
+        training_state, env_state, buffer_state, physics_buffer_state, prefill_key
     ) 
     return training_state, env_state, buffer_state, physics_buffer_state
   
@@ -1275,32 +1283,21 @@ def train(
   local_key, rb_key1, rb_key2, rb_key3 = jax.random.split(local_key, 4)
 
   # buffer states init
-  buffer_state = jax.pmap(replay_buffer.init)(
-      jax.random.split(rb_key1, local_devices_to_use)
-  )
+  buffer_state = replay_buffer.init(rb_key1)
+  physics_buffer_state = replay_buffer_physics_state.init(rb_key2)
+  model_buffer_init_key = rb_key3
+  model_buffer_state = model_replay_buffer.init(model_buffer_init_key)
 
-  physics_buffer_state = jax.pmap(replay_buffer_physics_state.init)(
-      jax.random.split(rb_key2, local_devices_to_use)
-  )
-
-  model_buffer_init_keys = jax.random.split(rb_key3, local_devices_to_use)
-  model_buffer_state = jax.pmap(model_replay_buffer.init)(model_buffer_init_keys)
-      
-  pmap_env_reset = jax.pmap(env.reset)
+  jit_env_reset = jax.jit(env.reset)
 
   # collect an initial dataset by running a random policy on the environment
   logging.info('Collecting initial random physics dataset')
   curr_env_key, local_key = jax.random.split(local_key)
-  env_keys = jax.random.split(curr_env_key, num_real_envs // jax.process_count())
-  env_keys = jnp.reshape(
-  env_keys, (local_devices_to_use, -1) + env_keys.shape[1:]
-  )
-  env_state = pmap_env_reset(env_keys)
+  env_keys = jax.random.split(curr_env_key, num_real_envs)
+  env_state = jit_env_reset(env_keys)
   prefill_key, local_key = jax.random.split(local_key)
   training_state, env_state, buffer_state, physics_buffer_state = run_eval_and_collect_data(training_state, env_state, buffer_state, physics_buffer_state, prefill_key)
-  replay_size = (
-    jnp.sum(jax.vmap(replay_buffer_physics_state.size)(physics_buffer_state)) * jax.process_count()
-  )
+  replay_size = replay_buffer_physics_state.size(physics_buffer_state)
   logging.info('physics replay size: %s', replay_size)
 
 
@@ -1312,16 +1309,11 @@ def train(
             action_repeat=action_repeat,
             reset_pipeline_state=not fast_model_rollout,
   ) 
-  model_env_reset = jax.vmap(jax.pmap(model_env.reset, axis_name=_PMAP_AXIS_NAME), in_axes=(0, None))
+  model_env_reset = jax.jit(jax.vmap(model_env.reset, in_axes=(0, None)))
 
-  # Hoisted outside the trial loop so JAX pmap cache hits every iteration.
-  _unflatten_pmap = jax.pmap(
-      replay_buffer_physics_state._unflatten_fn, axis_name=_PMAP_AXIS_NAME
-  )
-  _unflatten_vmap_pmap = jax.pmap(
-      jax.vmap(replay_buffer_physics_state._unflatten_fn),
-      axis_name=_PMAP_AXIS_NAME,
-  )
+  # Hoisted outside the trial loop so JAX jit cache hits every iteration.
+  _unflatten = jax.jit(replay_buffer_physics_state._unflatten_fn)
+  _unflatten_vmap = jax.jit(jax.vmap(replay_buffer_physics_state._unflatten_fn))
 
 # train, and collect data num_trial times
   num_steps = 0
@@ -1333,12 +1325,12 @@ def train(
             logging.info('Resetting model parameters and optimizer state...')
             training_state = _reset_model_params(training_state)
         logging.info('Starting Model Training...')
-        # All index arrays have fixed Python-int sizes so every downstream pmap/jit
+        # All index arrays have fixed Python-int sizes so every downstream jit
         # compiles once. We always permute max_physics_replay_size indices and map
         # into the valid range via modulo — replay_size_int is a runtime value (not a
         # shape), so wrapping it in jnp.array prevents JAX from folding it as a literal.
         replay_size_int = int(replay_size)
-        data = physics_buffer_state.data  # [1, max_physics_replay_size, raw_dim] — fixed
+        data = physics_buffer_state.data  # [max_physics_replay_size, raw_dim] — fixed
 
         fixed_train_size = int(0.8 * max_physics_replay_size / model_batch_size) * model_batch_size
         fixed_val_size   = max_physics_replay_size - fixed_train_size
@@ -1351,29 +1343,26 @@ def train(
         val_perm   = valid_perm[fixed_train_size:]
 
         # full_transitions — fixed shape, always valid data, compiles once
-        full_transitions = _unflatten_pmap(data[:, valid_perm, :])
+        full_transitions = _unflatten(data[valid_perm, :])
 
-        # train_data — fixed shape [1, fixed_train_size, raw_dim], compiles once
-        train_data = data[:, train_perm, :]
-        shuffle_idx = []
-        for _ in range(8):
-           local_key, shuffle_key = jax.random.split(local_key)
-           shuffle_idx.append(jax.random.permutation(shuffle_key, fixed_train_size))
-        shuffle_idx = jnp.stack(shuffle_idx, axis=0)
-        train_data = train_data[:, shuffle_idx, :]
+        # train_data — fixed shape [fixed_train_size, raw_dim], compiles once
+        train_data = data[train_perm, :]
+        local_key, *shuffle_keys = jax.random.split(local_key, 9)
+        shuffle_keys = jnp.stack(shuffle_keys, axis=0)
+        shuffle_idx = jax.vmap(lambda k: jax.random.permutation(k, fixed_train_size))(shuffle_keys)
+        train_data = train_data[shuffle_idx, :]
 
-        # val_data — fixed shape [1, fixed_val_size, raw_dim], compiles once
-        val_data = data[:, val_perm, :]
+        # val_data — fixed shape [fixed_val_size, raw_dim], compiles once
+        val_data = data[val_perm, :]
 
-        train_transitions = _unflatten_vmap_pmap(train_data)
-        train_transitions = jax.tree_util.tree_map(
-            lambda x: x.swapaxes(1,2), train_transitions
-        )
-        train_transitions = jax.tree_util.tree_map(
-            lambda x: jnp.reshape(x, (local_devices_to_use, num_updates_in_epoch, -1) + x.shape[2:]), train_transitions
-        )
+        def _reshape_train(x):
+            # x: (8, fixed_train_size, leaf_dim) from _unflatten_vmap
+            swapped = x.swapaxes(0, 1)  # (fixed_train_size, 8, leaf_dim)
+            return jnp.reshape(swapped, (num_updates_in_epoch, -1) + swapped.shape[1:])
+            # result: (num_updates_in_epoch, model_batch_size, 8, leaf_dim)
+        train_transitions = jax.tree_util.tree_map(_reshape_train, _unflatten_vmap(train_data))
 
-        val_transitions = _unflatten_pmap(val_data)
+        val_transitions = _unflatten(val_data)
 
         training_state = update_stats(training_state, full_transitions)
         training_key, local_key = jax.random.split(local_key)
@@ -1391,27 +1380,33 @@ def train(
         # sample initial states
         logging.info('Starting Agent training...')
         curr_env_key, local_key = jax.random.split(local_key)
-        env_keys = jax.random.split(curr_env_key, (num_envs*num_resampling_epochs) // jax.process_count())
+        env_keys = jax.random.split(curr_env_key, num_envs * num_resampling_epochs)
         env_keys = jnp.reshape(
-            env_keys, (num_resampling_epochs, local_devices_to_use, -1) + env_keys.shape[1:]
+            env_keys, (num_resampling_epochs, num_envs) + env_keys.shape[1:]
         )
         init_model_env_states = model_env_reset(env_keys, physics_buffer_state)
         info = init_model_env_states.info
-        info['model'] = tree_repeat(_unpmap(training_state.model_state), num_resampling_epochs)
-        info['model_obs_mean'] = jnp.repeat(jnp.expand_dims(training_state.model_obs_mean,0), num_resampling_epochs, axis=0)
-        info['model_obs_std'] = jnp.repeat(jnp.expand_dims(training_state.model_obs_std,0), num_resampling_epochs, axis=0)
-        info['next_state_delta_mean'] = jnp.repeat(jnp.expand_dims(training_state.next_state_delta_mean,0), num_resampling_epochs, axis=0)
-        info['next_state_delta_std'] = jnp.repeat(jnp.expand_dims(training_state.next_state_delta_std,0), num_resampling_epochs, axis=0)
-        info['per_step_cutoff'] = jnp.repeat(jnp.expand_dims(per_step_cutoff,0), num_resampling_epochs, axis=0)
-        info['accumulated_cutoff'] = jnp.repeat(jnp.expand_dims(accumulated_cutoff,0), num_resampling_epochs, axis=0)
-        info['binning_entropy'] = jnp.repeat(jnp.expand_dims(binning_entropy,0), num_resampling_epochs, axis=0)
+        info['model'] = tree_repeat(_unpmap(training_state.model_state.params), num_resampling_epochs)
+        scalar_fields = {
+            'model_obs_mean':       training_state.model_obs_mean,
+            'model_obs_std':        training_state.model_obs_std,
+            'next_state_delta_mean': training_state.next_state_delta_mean,
+            'next_state_delta_std': training_state.next_state_delta_std,
+            'per_step_cutoff':      per_step_cutoff,
+            'accumulated_cutoff':   accumulated_cutoff,
+            'binning_entropy':      binning_entropy,
+        }
+        repeated = jax.tree_util.tree_map(
+            lambda x: jnp.repeat(x[None], num_resampling_epochs, axis=0), scalar_fields
+        )
+        info.update(repeated)
         info['rng'] = env_keys
         init_model_env_states = init_model_env_states.replace(info=info)
         # local_key, buf_reset_key = jax.random.split(local_key)
         if reset_model_replay_buffer:
             logging.info('Resetting model replay buffer...')
             evolved_key = model_buffer_state.key
-            model_buffer_state = _reset_model_buffer(model_buffer_init_keys)
+            model_buffer_state = _reset_model_buffer(model_buffer_init_key)
             model_buffer_state = model_buffer_state.replace(key=evolved_key)
 
         if reset_agent_per_trial:
@@ -1432,9 +1427,7 @@ def train(
         logging.info('Actor Entropy: %s', metrics['training/actor_entropy'])
         logging.info('Target Entropy: %s', metrics['training/target_entropy'])
         logging.info('Average rollout length: %s', metrics['training/average_rollout_length'])
-        replay_size = (
-                jnp.sum(jax.vmap(model_replay_buffer.size)(model_buffer_state)) * jax.process_count()
-            )
+        replay_size = model_replay_buffer.size(model_buffer_state)
         logging.info('Model replay size: %s', replay_size)
         
 
@@ -1467,9 +1460,9 @@ def train(
                 'model_obs_std': np.array(_unpmap(training_state.model_obs_std)),
                 'next_state_delta_mean': np.array(_unpmap(training_state.next_state_delta_mean)),
                 'next_state_delta_std': np.array(_unpmap(training_state.next_state_delta_std)),
-                'per_step_cutoff': np.array(per_step_cutoff[0]),
-                'accumulated_cutoff': np.array(accumulated_cutoff[0]),
-                'binning_entropy': np.array(binning_entropy[0]),
+                'per_step_cutoff': np.array(per_step_cutoff),
+                'accumulated_cutoff': np.array(accumulated_cutoff),
+                'binning_entropy': np.array(binning_entropy),
             }
             model_ckpt_path = os.path.join(model_dir, f'model_state_{iteration}')
             brax_model.save_params(model_ckpt_path, model_ckpt)
@@ -1478,16 +1471,11 @@ def train(
         # collecting fresh experience using current policy
         logging.info('Collecting real experience...')
         curr_env_key, local_key = jax.random.split(local_key)
-        env_keys = jax.random.split(curr_env_key, num_real_envs // jax.process_count())
-        env_keys = jnp.reshape(
-        env_keys, (local_devices_to_use, -1) + env_keys.shape[1:]
-        )
-        env_state = pmap_env_reset(env_keys)
+        env_keys = jax.random.split(curr_env_key, num_real_envs)
+        env_state = jit_env_reset(env_keys)
         prefill_key, local_key = jax.random.split(local_key)
         training_state, env_state, buffer_state, physics_buffer_state = run_eval_and_collect_data(training_state, env_state, buffer_state, physics_buffer_state, prefill_key)
-        replay_size = (
-            jnp.sum(jax.vmap(replay_buffer_physics_state.size)(physics_buffer_state)) * jax.process_count()
-        )
+        replay_size = replay_buffer_physics_state.size(physics_buffer_state)
         logging.info('physics replay size: %s', replay_size)
         t1 = time.time()
         logging.info('Full iteration (model + agent + real data collection) took: %s seconds', t1 - t0)

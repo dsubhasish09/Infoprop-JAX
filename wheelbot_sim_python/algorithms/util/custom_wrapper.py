@@ -97,8 +97,10 @@ class VmapInfopropWrapper(Wrapper):
         return init_state
 
     def step(self, state: State, action: jax.Array) -> State:
+        """Vectorized step: pops plain model_params pytree from info, vmaps the
+        underlying env step across the ensemble batch, then reinserts model_params."""
         info = state.info
-        model = info.pop('model')
+        model_params = info.pop('model')
         obs_mean = info.pop('model_obs_mean')
         obs_std = info.pop('model_obs_std')
         next_state_delta_mean = info.pop('next_state_delta_mean')
@@ -115,7 +117,7 @@ class VmapInfopropWrapper(Wrapper):
 
         next_physics_state, rng, conditional_entropy, next_odom_state = (
             self.env.batched_model_step(
-                state, applied_torque, model, obs_mean, obs_std,
+                state, applied_torque, model_params, obs_mean, obs_std,
                 next_state_delta_mean, next_state_delta_std, binning_entropy,
             )
         )
@@ -132,7 +134,7 @@ class VmapInfopropWrapper(Wrapper):
         )
 
         info = next_state.info
-        info['model'] = model
+        info['model'] = model_params
         info['model_obs_mean'] = obs_mean
         info['model_obs_std'] = obs_std
         info['next_state_delta_mean'] = next_state_delta_mean
@@ -189,16 +191,16 @@ class CustomEpisodeWrapper(Wrapper):
         )
         state.info['steps'] = steps
 
-        # Aggregate state metrics into episode metrics
+        # Aggregate state metrics into episode metrics; zero them on episode reset.
         prev_done = state.info['episode_done']
-        state.info['episode_metrics']['sum_reward'] += jp.sum(rewards, axis=0)
-        state.info['episode_metrics']['sum_reward'] *= (1 - prev_done)
-        state.info['episode_metrics']['length'] += self.action_repeat
-        state.info['episode_metrics']['length'] *= (1 - prev_done)
+        ep = state.info['episode_metrics']
+        ep['sum_reward'] = jp.where(prev_done, 0.0, ep['sum_reward'] + jp.sum(rewards, axis=0))
+        ep['length'] = jp.where(prev_done, 0.0, ep['length'] + self.action_repeat)
         for metric_name in state.metrics.keys():
             if metric_name != 'reward':
-                state.info['episode_metrics'][metric_name] += state.metrics[metric_name]
-                state.info['episode_metrics'][metric_name] *= (1 - prev_done)
+                ep[metric_name] = jp.where(
+                    prev_done, 0.0, ep[metric_name] + state.metrics[metric_name]
+                )
         state.info['episode_done'] = done
         return state.replace(done=done)
 
@@ -309,27 +311,25 @@ class CustomAutoResetWrapper2(Wrapper):
                 done = jp.reshape(done, [x.shape[0]] + [1] * (len(x.shape) - 1))  # type: ignore
             return jp.where(done, x, y)
 
+        # Reset pipeline_state and obs (separate pytree structures).
         pipeline_state = jax.tree.map(
             where_done, state.info['first_pipeline_state'], state.pipeline_state
         )
         obs = jax.tree.map(where_done, state.info['first_obs'], state.obs)
-        physics_state = jax.tree.map(
-            where_done, state.info['first_physics_state'], state.info['physics_state']
-        )
-        applied_torque = jax.tree.map(
-            where_done, state.info['first_applied_torque'], state.info['applied_torque']
-        )
-        invariant_physics_state = jax.tree.map(
-            where_done,
-            state.info['first_invariant_physics_state'],
-            state.info['invariant_physics_state'],
-        )
-        steps = jax.tree.map(
-            where_done, jp.zeros_like(state.info['steps']), state.info['steps']
-        )
+
+        # Reset info-dict fields in one combined tree.map pass.
+        first_info = {
+            'physics_state':           state.info['first_physics_state'],
+            'applied_torque':          state.info['first_applied_torque'],
+            'invariant_physics_state': state.info['first_invariant_physics_state'],
+            'steps':                   jp.zeros_like(state.info['steps']),
+        }
+        curr_info = {
+            'physics_state':           state.info['physics_state'],
+            'applied_torque':          state.info['applied_torque'],
+            'invariant_physics_state': state.info['invariant_physics_state'],
+            'steps':                   state.info['steps'],
+        }
         info = state.info
-        info['physics_state'] = physics_state
-        info['applied_torque'] = applied_torque
-        info['invariant_physics_state'] = invariant_physics_state
-        info['steps'] = steps
+        info.update(jax.tree.map(where_done, first_info, curr_info))
         return state.replace(pipeline_state=pipeline_state, obs=obs, info=info)
