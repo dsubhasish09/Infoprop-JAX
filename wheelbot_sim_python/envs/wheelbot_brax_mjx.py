@@ -325,7 +325,11 @@ class Wheelbot(PipelineEnv):
         trajectory = get_trajectory_by_seed(track_seed, self.lookahead)
         traj_state = trajectory.get_state(pos_xy, yaw, self.sin_cos_encoding)
         robot_state_masked = robot_state * self.robot_state_mask
-        extras = jp.array([data.qpos[2], *(data.qvel[0:3])])
+        body_vel = (
+            Ry(-robot_state[2]) @ Rx(-robot_state[1]) @ Rz(-robot_state[0])
+            @ data.qvel[0:3][:, None]
+        ).flatten()
+        extras = jp.array([data.qpos[2], *body_vel])
         return jp.array([*traj_state, *robot_state_masked, *extras])
 
     def _get_rew(self, State, action):

@@ -23,6 +23,7 @@ def wrap_custom(
     replay_buffer,
     episode_length: int = 1000,
     action_repeat: int = 1,
+    reset_pipeline_state: bool = True,
     randomization_fn: Optional[
         Callable[[System], Tuple[System, System]]
     ] = None,
@@ -30,7 +31,7 @@ def wrap_custom(
     """Apply episode-tracking wrapper to the environment."""
     env = VmapInfopropWrapper(env, replay_buffer)
     env = CustomEpisodeWrapper(env, episode_length, action_repeat)
-    env = CustomAutoResetWrapper(env)
+    env = CustomAutoResetWrapper(env, reset_pipeline_state=reset_pipeline_state)
     return env
 
 
@@ -205,9 +206,14 @@ class CustomEpisodeWrapper(Wrapper):
 class CustomAutoResetWrapper(Wrapper):
     """Automatically resets Brax envs that are done."""
 
+    def __init__(self, env: Env, reset_pipeline_state: bool = True):
+        super().__init__(env)
+        self.reset_pipeline_state = reset_pipeline_state
+
     def reset(self, rng: jax.Array, physics_buffer_state) -> State:
         state = self.env.reset(rng, physics_buffer_state)
-        state.info['first_pipeline_state'] = state.pipeline_state
+        if self.reset_pipeline_state:
+            state.info['first_pipeline_state'] = state.pipeline_state
         state.info['first_obs'] = state.obs
         state.info['first_physics_state'] = state.info['physics_state']
         state.info['first_accumulated_conditional_entropy'] = (
@@ -238,7 +244,6 @@ class CustomAutoResetWrapper(Wrapper):
             return jp.where(d, x, y)
 
         first = {
-            'pipeline_state': state.info['first_pipeline_state'],
             'obs': state.info['first_obs'],
             'physics_state': state.info['first_physics_state'],
             'accumulated_conditional_entropy': state.info['first_accumulated_conditional_entropy'],
@@ -250,7 +255,6 @@ class CustomAutoResetWrapper(Wrapper):
             'steps': jp.zeros_like(state.info['steps']),
         }
         current = {
-            'pipeline_state': state.pipeline_state,
             'obs': state.obs,
             'physics_state': state.info['physics_state'],
             'accumulated_conditional_entropy': state.info['accumulated_conditional_entropy'],
@@ -261,6 +265,9 @@ class CustomAutoResetWrapper(Wrapper):
             'act_history': state.info['act_history'],
             'steps': state.info['steps'],
         }
+        if self.reset_pipeline_state:
+            first['pipeline_state'] = state.info['first_pipeline_state']
+            current['pipeline_state'] = state.pipeline_state
         reset = jax.tree.map(where_done, first, current)
 
         info = state.info
@@ -276,7 +283,8 @@ class CustomAutoResetWrapper(Wrapper):
             state.done * state.info['steps']
         )
         info['steps'] = reset['steps']
-        return state.replace(pipeline_state=reset['pipeline_state'], obs=reset['obs'], info=info)
+        pipeline_state = reset['pipeline_state'] if self.reset_pipeline_state else state.pipeline_state
+        return state.replace(pipeline_state=pipeline_state, obs=reset['obs'], info=info)
 
 
 class CustomAutoResetWrapper2(Wrapper):

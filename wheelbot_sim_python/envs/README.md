@@ -50,7 +50,7 @@ Angles can optionally be encoded as (sin, cos) pairs via `sin_cos_encoding` in t
 
 **Masked robot state (10D):** the full 10D state from `qpos_qvel_to_robot_state` with yaw, drive_angle, and balance_angle zeroed out (mask `[0,1,1,1,1,1,0,1,0,1]`).
 
-**Extras:** height `z` and world-frame body velocity `[vx, vy, vz]`.
+**Extras:** height `z` and body-frame velocity `[body_vx, body_vy, body_vz]`.
 
 The dynamics model additionally receives a history of the last `obs_history` steps of `physics_state` (11D variant state) and the last `act_history` applied torques, stored in `state.info['phys_state_history']` and `state.info['act_history']`.
 

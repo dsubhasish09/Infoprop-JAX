@@ -192,6 +192,7 @@ class Wheelbot(PipelineEnv):
       track_seed: Optional[int] = None,
       min_log_var: float = -4,
       max_log_var: float = -2,
+      fast_model_rollout: bool = False,
       **kwargs,
   ):
     mjcf_path = (WHEELBOT_ROOT_PATH / 'mjcf').as_posix()
@@ -262,6 +263,7 @@ class Wheelbot(PipelineEnv):
     self.init_angle_std = cfg.get('init_angle_std', jp.pi/3)
     self.min_log_var = min_log_var
     self.max_log_var = max_log_var
+    self.fast_model_rollout = fast_model_rollout
     # History parameters for model learning
     self.obs_history = cfg.get('obs_history', 1)
     self.act_history = cfg.get('act_history', 0)
@@ -278,8 +280,66 @@ class Wheelbot(PipelineEnv):
     trajectory = get_trajectory_by_seed(track_seed, self.lookahead)
     traj_state = trajectory.get_state(pos_xy, yaw, self.sin_cos_encoding)
     robot_state_masked = robot_state * self.robot_state_mask
-    extras = jp.array([data.qpos[2], *(data.qvel[0:3])])
+    body_vel = (
+        Ry(-robot_state[2]) @ Rx(-robot_state[1]) @ Rz(-robot_state[0])
+        @ data.qvel[0:3][:, None]
+    ).flatten()
+    extras = jp.array([data.qpos[2], *body_vel])
     return jp.array([*traj_state, *robot_state_masked, *extras])
+
+  def _get_obs_from_states(
+      self,
+      physics_state: jp.ndarray,
+      invariant_physics_state: jp.ndarray,
+      track_seed: int,
+  ) -> jp.ndarray:
+    """Construct observation directly from variant and invariant state."""
+    robot_state = jp.array([
+        invariant_physics_state[0],
+        *physics_state[:5],
+        invariant_physics_state[1],
+        physics_state[5],
+        invariant_physics_state[2],
+        physics_state[6],
+    ])
+    trajectory = get_trajectory_by_seed(track_seed, self.lookahead)
+    traj_state = trajectory.get_state(
+        invariant_physics_state[3:5], invariant_physics_state[0], self.sin_cos_encoding
+    )
+    robot_state_masked = robot_state * self.robot_state_mask
+    extras = jp.array([physics_state[-1], *physics_state[7:10]])
+    return jp.array([*traj_state, *robot_state_masked, *extras])
+
+  def _get_model_data_and_obs(
+      self,
+      state: State,
+      physics_state: jp.ndarray,
+      invariant_physics_state: jp.ndarray,
+      action: jp.ndarray,
+      track_seed: int,
+  ):
+    """Build the next pipeline state and observation for render or fast rollout."""
+    if self.fast_model_rollout:
+      return None, self._get_obs_from_states(
+          physics_state, invariant_physics_state, track_seed
+      )
+
+    robot_state = jp.array([
+        invariant_physics_state[0],
+        *physics_state[:5],
+        invariant_physics_state[1],
+        physics_state[5],
+        invariant_physics_state[2],
+        physics_state[6],
+    ])
+    qpos, qvel = robot_state_to_qpos_qvel(robot_state)
+    qpos = qpos.at[0:3].set(jp.concatenate([invariant_physics_state[-2:], physics_state[-1:]]))
+    qvel = qvel.at[0:3].set(
+        (YRP(invariant_physics_state[0], physics_state[0], physics_state[1])
+        @ physics_state[7:10][:, None]).squeeze(-1)
+    )
+    data = self.pipeline_init(qpos, qvel)
+    return data, self._get_obs(data, action, track_seed)
 
   def _get_rew(self, State, action):
     state = State.obs
@@ -462,7 +522,8 @@ class Wheelbot(PipelineEnv):
         'act_history': init_action_history,
         'phys_state_history': init_physics_state_history,
     }
-    return State(data, obs, reward, done, metrics, info)
+    pipeline_state = None if self.fast_model_rollout else data
+    return State(pipeline_state, obs, reward, done, metrics, info)
 
   def reset_with_init_robot_state_eval(
       self, rng: jp.ndarray, init_history, track_seed, init_xy, init_angle
@@ -594,13 +655,9 @@ class Wheelbot(PipelineEnv):
   ):
     """Update observation, state history, and info dict after the model prediction."""
     track_seed = state.info['track_seed']
-    next_robot_state = jp.array([next_odom_state[0], *(next_physics_state[:5]), next_odom_state[1], next_physics_state[5], next_odom_state[2], next_physics_state[6]])
-    qpos, qvel = robot_state_to_qpos_qvel(next_robot_state)
-    # x,y from odom (last 2 elements); z from physics_state index 10
-    qpos = qpos.at[0:3].set(jp.concatenate([next_odom_state[-2:], next_physics_state[-1:]]))
-    qvel = qvel.at[0:3].set((YRP(next_odom_state[0], next_physics_state[0], next_physics_state[1]) @ next_physics_state[7:10][:, None]).squeeze(-1))
-    data = self.pipeline_init(qpos, qvel)
-    obs = self._get_obs(data, action_clipped, track_seed)
+    data, obs = self._get_model_data_and_obs(
+        state, next_physics_state, next_odom_state, action_clipped, track_seed
+    )
 
     info = state.info
     info['applied_torque'] = applied_torque
@@ -669,7 +726,6 @@ class Wheelbot(PipelineEnv):
     Applies the RL action through the balancing prior, runs the InfoProp ensemble step,
     checks entropy-based termination, and returns the updated Brax State.
     """
-    data0 = state.pipeline_state
     obs = state.obs
     track_seed = state.info['track_seed']
     robot_state = obs[self._obs_slice_start:]
@@ -685,14 +741,9 @@ class Wheelbot(PipelineEnv):
 
 
 
-    next_robot_state = jp.array([next_odom_state[0], *(next_physics_state[:5]), next_odom_state[1], next_physics_state[5], next_odom_state[2], next_physics_state[6]])
-    qpos, qvel = robot_state_to_qpos_qvel(next_robot_state)
-    # x,y from odom (last 2 elements); z from physics_state index 10
-    qpos = qpos.at[0:3].set(jp.concatenate([next_odom_state[-2:], next_physics_state[-1:]]))
-    qvel = qvel.at[0:3].set((YRP(next_odom_state[0], next_physics_state[0], next_physics_state[1]) @ next_physics_state[7:10][:, None]).squeeze(-1))
-    data = self.pipeline_init(qpos, qvel)
-
-    obs = self._get_obs(data, action_clipped, track_seed)
+    data, obs = self._get_model_data_and_obs(
+        state, next_physics_state, next_odom_state, action_clipped, track_seed
+    )
 
     info = state.info
     
@@ -729,7 +780,6 @@ class Wheelbot(PipelineEnv):
   
   def direct_step(self, state: State, action: jp.ndarray) -> State:
     """Variant of step used directly by the SAC agent (bypasses control-law splitting)."""
-    data0 = state.pipeline_state
     obs = state.obs
     track_seed = state.info['track_seed']
     # robot_state = obs[2 * lookahead + 2:]
@@ -745,14 +795,9 @@ class Wheelbot(PipelineEnv):
 
 
 
-    next_robot_state = jp.array([next_odom_state[0], *(next_physics_state[:5]), next_odom_state[1], next_physics_state[5], next_odom_state[2], next_physics_state[6]])
-    qpos, qvel = robot_state_to_qpos_qvel(next_robot_state)
-    # x,y from odom (last 2 elements); z from physics_state index 10
-    qpos = qpos.at[0:3].set(jp.concatenate([next_odom_state[-2:], next_physics_state[-1:]]))
-    qvel = qvel.at[0:3].set((YRP(next_odom_state[0], next_physics_state[0], next_physics_state[1]) @ next_physics_state[7:10][:, None]).squeeze(-1))
-    data = self.pipeline_init(qpos, qvel)
-
-    obs = self._get_obs(data, action, track_seed)
+    data, obs = self._get_model_data_and_obs(
+        state, next_physics_state, next_odom_state, action, track_seed
+    )
 
     info = state.info
     

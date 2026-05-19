@@ -25,12 +25,11 @@ from brax.training.types import Metrics
 from brax.training.types import Policy
 from brax.training.types import PolicyParams
 from brax.training.types import PRNGKey
-from brax.v1 import envs as envs_v1
 import jax
 import numpy as np
 
-State = Union[envs.State, envs_v1.State]
-Env = Union[envs.Env, envs_v1.Env, envs_v1.Wrapper]
+State = envs.State
+Env = Union[envs.Env, envs.Wrapper]
 
 
 class CustomEvaluator(Evaluator):
@@ -74,7 +73,10 @@ class CustomEvaluator(Evaluator):
         self._key, unroll_key = jax.random.split(self._key)
 
         t = time.time()
-        eval_state = self._generate_eval_unroll(policy_params, unroll_key)
+        eval_state = self._generate_eval_unroll(
+            self._eval_state_to_donate, policy_params, unroll_key
+        )
+        self._eval_state_to_donate = eval_state
         eval_metrics = eval_state.info['eval_metrics']
         eval_metrics.active_episodes.block_until_ready()
         epoch_eval_time = time.time() - t

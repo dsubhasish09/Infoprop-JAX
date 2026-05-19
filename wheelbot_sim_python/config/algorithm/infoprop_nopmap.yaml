@@ -1,4 +1,4 @@
-name: "infoprop"
+name: "infoprop_nopmap"
 
 num_timesteps: 10000000
 episode_length: 2000
