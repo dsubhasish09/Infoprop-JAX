@@ -3,7 +3,7 @@ Hydra entry point for Infoprop Dyna training on the Mini Wheelbot.
 
 Reads configuration from wheelbot_sim_python/config/, sets up Weights & Biases
 logging, defines domain randomisation, registers Brax environments, and calls
-the main `train` function from infoprop.py.
+the single-GPU `train` function from infoprop.py.
 
 Run with:
     python -m wheelbot_sim_python.main
