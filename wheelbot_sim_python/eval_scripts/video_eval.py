@@ -277,6 +277,7 @@ def run(eval_cfg):
         model_state_template, _, _, _, _, _, _ = model_trainer.init(jax.random.PRNGKey(0))
         model_state = model_state_template.replace(
             params=jax.tree_util.tree_map(jnp.array, model_ckpt['params']))
+        env_model._model_apply_fn = model_state.apply_fn
 
         model_obs_mean        = jnp.array(model_ckpt['model_obs_mean'])
         model_obs_std         = jnp.array(model_ckpt['model_obs_std'])
@@ -293,7 +294,7 @@ def run(eval_cfg):
             model_reset_rng, init_history, track_seed_val,
             invariant_physics_state[3:5], invariant_physics_state[0])
         state_model = env_model.put_in_NN_params_and_rng(
-            model_state, model_obs_mean, model_obs_std,
+            model_state.params, model_obs_mean, model_obs_std,
             next_state_delta_mean, next_state_delta_std,
             per_step_cutoff, accumulated_cutoff, binning_entropy,
             model_env_rng, state_model,
