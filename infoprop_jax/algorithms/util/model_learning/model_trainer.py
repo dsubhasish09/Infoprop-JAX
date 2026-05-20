@@ -23,7 +23,7 @@ from .model_update_step import (
     per_ensemble_nll,
 )
 # from mbpo.data.dataset import Dataset
-from wheelbot_sim_python.algorithms.util.nn.gaussian_env_model import GaussianEnsembleModel
+from infoprop_jax.algorithms.util.nn.gaussian_env_model import GaussianEnsembleModel
 
 DataType = Union[np.ndarray, Dict[str, "DataType"]]
 Params = flax.core.FrozenDict[str, Any]

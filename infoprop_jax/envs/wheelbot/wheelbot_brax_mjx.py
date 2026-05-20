@@ -6,7 +6,7 @@ This is the real-world proxy environment used for:
   - Final policy evaluation after training.
 
 During model-based training (InfoProp Dyna), this environment is replaced by
-wheelbot_brax_infoprop.py which uses the learned ensemble model instead.
+infoprop_env.py which uses the learned ensemble model instead.
 
 Robot dynamics summary:
   - 2-wheeled differential robot with a reaction wheel for pitch balance.
@@ -38,7 +38,7 @@ import mediapy as media
 from omegaconf import dictconfig, OmegaConf
 import xml.etree.ElementTree as ET
 from .utils import compute_line_element
-from ..track.generator import create_track, load_track_by_seed
+from .assets.track.generator import create_track, load_track_by_seed
 from .trajectory import Trajectory, pad_line_segments_to_size, points_to_line_segemnt
 
 
@@ -183,7 +183,9 @@ _VARIANT_INDICES = jp.array([1, 2, 3, 4, 5, 7, 9])
 _PITCH_CTRL_INDICES = jp.array([2, 5, 6, 7])
 _ROLL_CTRL_INDICES = jp.array([1, 4, 8, 9])
 
-WHEELBOT_ROOT_PATH = epath.Path(epath.resource_path('wheelbot_sim_python'))
+WHEELBOT_ASSET_PATH = (
+    epath.Path(epath.resource_path('infoprop_jax')) / 'envs' / 'wheelbot' / 'assets'
+)
 
 # Create trajectories statically to be used in reset method.
 tracks = [load_track_by_seed(i) for i in range(200)]
@@ -216,7 +218,7 @@ class Wheelbot(PipelineEnv):
         """Initialise the MJX environment: load the MuJoCo XML, configure the solver,
         and pre-load all training tracks from disk.
         """
-        mjcf_path = (WHEELBOT_ROOT_PATH / 'mjcf').as_posix()
+        mjcf_path = (WHEELBOT_ASSET_PATH / 'mjcf').as_posix()
         xml_path = mjcf_path + '/wheelbot_alpha.xml'
         xml_str = epath.Path(xml_path).read_text()
 

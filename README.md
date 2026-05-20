@@ -1,6 +1,7 @@
-# Wheelbot Racing — Infoprop Dyna
+# Infoprop JAX
 
-JAX/Brax implementation of [Infoprop Dyna](https://arxiv.org/abs/2501.16918) for training a miniature two-wheeled robot to race around procedurally-generated tracks.
+JAX/Brax implementation of [Infoprop Dyna](https://arxiv.org/abs/2501.16918).
+The current example trains a Mini Wheelbot to race around procedurally generated tracks.
 The full physics simulation runs on [MuJoCo MJX](https://mujoco.readthedocs.io/en/stable/mjx.html); policy training uses massively parallel model rollouts on GPU via [Brax](https://github.com/google/brax).
 
 ## Algorithm Overview
@@ -15,19 +16,15 @@ The training cycle alternates between:
 3. **Cutoff computation** — the ensemble is evaluated on the full buffer to derive rollout termination thresholds λ₁ (per-step) and λ₂ (accumulated) from the conditional entropy of the Kalman-filtered state estimate (paper eq. 12).
 4. **Policy training (SAC)** — many parallel model rollouts branch from real initial states. Rollouts terminate when accumulated information loss exceeds λ₂, and the policy is updated repeatedly on each model step.
 
-**Dynamics invariances** are exploited to augment initial states: the robot's global XY position, yaw, and wheel angles are invariant to the learned dynamics, so rollouts can start from arbitrary positions on any of the pre-generated tracks — not just those visited in real data.
-
-**Partial observability** is handled by conditioning the dynamics model on a history of `H = 20` past states and actions rather than a single state.
-
 For the full technical treatment see:
-> Frauenknecht et al., *Infoprop: Propagating Uncertainty in Model-Based Reinforcement Learning*, 2025.
+> Frauenknecht et al., *On Rollouts in Model-Based Reinforcement Learning*, 2025.
 > https://arxiv.org/abs/2501.16918
 
 ## Repository Structure
 
 ```
-wheelbot-racing/
-├── wheelbot_sim_python/
+infoprop-jax/
+├── infoprop_jax/
 │   ├── main.py                        # Top-level Hydra entry point
 │   ├── algorithms/
 │   │   ├── infoprop.py                # Full Infoprop Dyna training loop (SAC + model)
@@ -43,21 +40,22 @@ wheelbot-racing/
 │   │       ├── custom_evaluator.py    # Parallel evaluation wrapper
 │   │       └── custom_wrapper.py      # Episode-tracking Brax wrappers
 │   ├── envs/
-│   │   ├── wheelbot_brax_mjx.py       # Ground-truth MJX physics environment
-│   │   ├── wheelbot_brax_infoprop.py  # Model-based environment (Infoprop rollouts)
-│   │   ├── trajectory.py              # Track state: cross-track error, lookahead
-│   │   ├── utils.py                   # Geometry helpers
-│   │   └── README.md                  # Environment deep-dive
-│   ├── track/
-│   │   ├── generator.py               # Procedural track generation (Catmull-Rom)
-│   │   └── utils.py                   # Contour discretisation
+│   │   ├── infoprop_env.py            # Model-based environment (Infoprop rollouts)
+│   │   ├── README.md                  # General environment architecture
+│   │   └── wheelbot/
+│   │       ├── wheelbot_brax_mjx.py   # Ground-truth MJX physics environment
+│   │       ├── trajectory.py          # Track state: cross-track error, lookahead
+│   │       ├── utils.py               # Wheelbot geometry helpers
+│   │       ├── README.md              # Wheelbot environment details
+│   │       └── assets/
+│   │           ├── mjcf/              # Wheelbot MuJoCo XML and meshes
+│   │           └── track/             # Track generation code and saved .npz tracks
 │   ├── training_scripts/
 │   │   └── brax_infoprop_train.py     # Hydra entry point + domain randomisation
 │   └── config/
 │       ├── main.yaml                  # Hydra composition + run metadata
 │       ├── algorithm/infoprop.yaml    # Model and SAC hyperparameters
 │       └── env/wheelbot.yaml          # Robot control, reward, noise config
-├── saved_tracks/                      # 200 pre-generated track .npz files
 ├── pyproject.toml                     # Direct project dependencies
 └── uv.lock                            # Resolved dependency lockfile
 ```
@@ -67,7 +65,7 @@ wheelbot-racing/
 1. Clone this repository:
    ```bash
    git clone <repo-url>
-   cd wheelbot-racing
+   cd infoprop-jax
    ```
 
 2. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) (recommended package manager):
@@ -102,7 +100,7 @@ wheelbot-racing/
 
 6. Verify installation:
    ```bash
-   python -m wheelbot_sim_python.envs.wheelbot_brax_mjx
+   python -m infoprop_jax.envs.wheelbot.wheelbot_brax_mjx
    ```
 
 ### Changing JAX Versions
@@ -125,17 +123,17 @@ uv pip list | rg '^(jax|jaxlib|jax-cuda|flax|optax|chex|orbax|brax)'
 
 ## Running Training
 
-Training is managed by [Hydra](https://hydra.cc/). The top-level entry point is `wheelbot_sim_python/main.py`.
+Training is managed by [Hydra](https://hydra.cc/). The top-level entry point is `infoprop_jax/main.py`.
 
 ```bash
-python -m wheelbot_sim_python.main
+python -m infoprop_jax.main
 ```
 
 Hydra will create a timestamped output directory under `exp/` and log metrics to [Weights & Biases](https://wandb.ai/) (project `JAX_Mini_Wheelbot` by default).
 
 **Override config values on the command line:**
 ```bash
-python -m wheelbot_sim_python.main \
+python -m infoprop_jax.main \
     experiment=my_run \
    algorithm.num_model_envs=<value> \
    algorithm.max_rollout_length=<value>
@@ -143,35 +141,35 @@ python -m wheelbot_sim_python.main \
 
 **Resume from a checkpoint** (automatic if a checkpoint exists in the Hydra output dir):
 ```bash
-python -m wheelbot_sim_python.main \
+python -m infoprop_jax.main \
     hydra.run.dir=exp/2025-01-01_12-00-00 \
     algorithm.auto_resume=true
 ```
 
 ## Key Configuration
 
-Configuration is split across three YAML files that compose via Hydra defaults. The concrete values live in those YAMLs, not in this README.
+Configuration is split across YAML files under `infoprop_jax/config/` that compose via Hydra defaults. The concrete values live in those YAMLs, not in this README.
 
-### `config/main.yaml`
+### `infoprop_jax/config/main.yaml`
 
 Composes the algorithm and environment configs and stores run metadata such as the seed, experiment name, W&B project, and output paths.
 
-### `config/algorithm/infoprop.yaml`
+### `infoprop_jax/config/algorithm/infoprop.yaml`
 
 Defines the Infoprop Dyna model, SAC, rollout, and training hyperparameters.
 
-### `config/env/wheelbot.yaml`
+### `infoprop_jax/config/env/wheelbot.yaml`
 
 Defines the Wheelbot control, reward, observation-history, and noise settings.
 
-### `config/eval/video_eval.yaml`
+### `infoprop_jax/config/eval/video_eval.yaml`
 
 Defines evaluation settings for video rendering (checkpoint path, track seed, output directory).
 
 ## References
 
 - **Infoprop paper**: Frauenknecht et al., 2025 — https://arxiv.org/abs/2501.16918
-- **Mini Wheelbot paper**: The Mini Wheelbot: A Testbed for Learning-based Balancing, Flips, and Articulated Driving — https://arxiv.org/abs/2502.04582
+- **Mini Wheelbot paper**: Hose et al., 2025 — https://arxiv.org/abs/2502.04582
 - **Brax**: Freeman et al., 2021 — https://github.com/google/brax
 - **MuJoCo MJX**: https://mujoco.readthedocs.io/en/stable/mjx.html
 - **SAC**: Haarnoja et al., 2018 — https://arxiv.org/abs/1812.05905
