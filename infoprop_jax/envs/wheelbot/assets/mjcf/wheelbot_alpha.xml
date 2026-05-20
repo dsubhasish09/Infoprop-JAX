@@ -14,7 +14,7 @@
     </body>
     <geom name="ground" type="plane" size="8 8 0.1" material="checker_mat"/>
     <body name ="body" pos="0 0 .0645" euler="0 0 0">
-      <inertial pos="0 0 0" mass="0.56939" diaginertia="6.439e-4 1.368e-3 1.012e-3"/>
+      <inertial pos="0 0 0" mass="0.43" diaginertia="220e-6 190e-6 300e-6"/> 
       <site name = "imu_1" pos = "-0.0234 -0.0204 0.01939" euler="180 0 90" type="box" size="0.0045 0.003 0.00095"/>
       <site name = "imu_2" pos = "0.0234 0.0204 0.01939" euler="180 0 90" type="box" size="0.0045 0.003 0.00095"/>
       <site name = "imu_3" pos = "-0.016427 0.020172 -0.01889" euler="0 0 90" type="box" size="0.0045 0.003 0.00095"/>
@@ -22,13 +22,13 @@
       <joint type="free"/>
       <geom name="body_geom" type="mesh" mesh="body"/>
       <body name ="wheel1" pos="0 0 -0.0325" euler="0 0 -90">
-        <inertial pos="0 0 0" mass="0.11002" diaginertia="8.852e-5 4.503e-5 4.503e-5"/> 
-        <joint name="w1" type="hinge" pos="0 0 0" axis="-1 0 0" damping="1.377e-4" frictionloss="8.061e-4"/>
+        <inertial pos="0 0 0" mass="0.13" diaginertia="100e-6 53e-6 53e-6"/> 
+        <joint name="w1" type="hinge" pos="0 0 0" axis="-1 0 0" damping="0.0"/>
         <geom name="wheel_1_geom" type="mesh" mesh="wheel"/>
       </body>
       <body name ="wheel2" pos="0 0 0.0325" euler="0 0 0">
-        <inertial pos="0 0 0" mass="0.11002" diaginertia="8.852e-5 4.503e-5 4.503e-5"/>
-        <joint name="w2" type="hinge" pos="0 0 0" axis="1 0 0" damping="1.075e-4" frictionloss="1.198e-5"/>
+        <inertial pos="0 0 0" mass="0.13" diaginertia="100e-6 53e-6 53e-6"/> 
+        <joint name="w2" type="hinge" pos="0 0 0" axis="1 0 0" damping="0.0"/>
         <geom name="wheel_2_geom" type="mesh" mesh="wheel"/>
       </body>
       <light diffuse=".9 .9 .9" pos="0 0 5" dir="0 0 -1"/>
@@ -68,6 +68,6 @@
     <exclude body1="wheel1" body2="body"/>
     <exclude body1="wheel2" body2="body"/>
 
-    <pair geom1="wheel_1_geom" geom2="ground" condim="6" friction="3.4515 3.4515 7.145e-4 2.147e-3 2.147e-3" solimp="0.9 0.95 0.001 0.5 2" solref="0.02 1"/>
+    <pair geom1="wheel_1_geom" geom2="ground" condim="6" friction="1 1 0.005 0.0001 0.0001" solimp="0.9 0.95 0.001 0.5 2" solref="0.02 1"/>
   </contact>
 </mujoco>
