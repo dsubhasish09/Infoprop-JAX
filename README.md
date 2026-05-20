@@ -58,9 +58,8 @@ wheelbot-racing/
 │       ├── algorithm/infoprop.yaml    # Model and SAC hyperparameters
 │       └── env/wheelbot.yaml          # Robot control, reward, noise config
 ├── saved_tracks/                      # 200 pre-generated track .npz files
-├── requirements/
-│   └── requirements.txt
-└── setup.py
+├── pyproject.toml                     # Direct project dependencies
+└── uv.lock                            # Resolved dependency lockfile
 ```
 
 ## Installation
@@ -82,20 +81,47 @@ wheelbot-racing/
    source .venv/bin/activate
    ```
 
-4. Install dependencies:
+4. Resolve and install dependencies:
    ```bash
-   uv pip install -r requirements/requirements.txt
+   uv lock
+   uv sync
    ```
 
-5. Install the package in editable mode:
+   `pyproject.toml` lists the packages this project directly depends on.
+   `uv.lock` records the exact compatible versions that `uv` resolved, including transitive packages such as `jaxlib`, CUDA plugins, `chex`, and `orbax-checkpoint`.
+
+   If `uv` fails with a cache or read-only filesystem error on a cluster, point the cache at a writable temporary directory:
    ```bash
-   uv pip install -e .
+   UV_CACHE_DIR=/tmp/uv-cache uv sync
+   ```
+
+5. Verify the environment:
+   ```bash
+   uv pip check
    ```
 
 6. Verify installation:
    ```bash
    python -m wheelbot_sim_python.envs.wheelbot_brax_mjx
    ```
+
+### Changing JAX Versions
+
+To test a different JAX/CUDA stack, change only the direct JAX requirement and let `uv` resolve the rest:
+
+```bash
+uv add "jax[cuda12]==0.9.2"
+uv sync
+uv pip check
+```
+
+The quotes around `jax[cuda12]` are important when using `zsh`, because square brackets are otherwise treated as filename patterns.
+
+To inspect the resolved JAX-related package set:
+
+```bash
+uv pip list | rg '^(jax|jaxlib|jax-cuda|flax|optax|chex|orbax|brax)'
+```
 
 ## Running Training
 
