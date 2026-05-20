@@ -19,7 +19,7 @@ export MUJOCO_GL=egl
 
 python -m wheelbot_sim_python.main \
     algorithm=infoprop \
-    experiment=default_run_refactored \
+    experiment=testing_jax_versions_ignore \
     seed=$RANDOM \
     algorithm.num_model_envs=1000 \
     algorithm.grad_updates_per_model_step=10 \
@@ -28,4 +28,5 @@ python -m wheelbot_sim_python.main \
     algorithm.reset_model_per_trial=False \
     env.rew_scale=1.0 \
     algorithm.tau=0.005 \
-    algorithm.alpha=0.1
+    algorithm.alpha=0.1 \
+    algorithm.num_trials=3
