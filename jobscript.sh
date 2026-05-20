@@ -19,5 +19,5 @@ export MUJOCO_GL=egl
 
 python -m infoprop_jax.main \
     algorithm=infoprop \
-    experiment=testing_jax_versions_ignore \
+    experiment=latest_repo_smoke_test \
     seed=$RANDOM
