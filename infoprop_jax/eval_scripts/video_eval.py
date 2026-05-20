@@ -3,11 +3,11 @@
 Can be invoked in two ways:
 
 1. Via the Hydra main entry point (recommended):
-       python -m wheelbot_sim_python.main video_eval=true eval.log_dir=exp/test/27752/2026.05.05/135429
+       python -m infoprop_jax.main video_eval=true eval.log_dir=exp/test/27752/2026.05.05/135429
    Override any eval param on the CLI, e.g. eval.track_seed=42 eval.iteration=3
 
 2. As a standalone script:
-       python -m wheelbot_sim_python.eval_scripts.video_eval <log_dir> [options]
+       python -m infoprop_jax.eval_scripts.video_eval <log_dir> [options]
 """
 
 import argparse
@@ -28,8 +28,8 @@ from brax.training.acme import running_statistics
 from brax.training.agents.sac import networks as sac_networks
 from omegaconf import OmegaConf
 
-from wheelbot_sim_python.envs.wheelbot_brax_mjx import Wheelbot as RealWheelbot
-from wheelbot_sim_python.envs.wheelbot_brax_infoprop import Wheelbot as ModelWheelbot
+from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import Wheelbot as RealWheelbot
+from infoprop_jax.envs.infoprop_env import Wheelbot as ModelWheelbot
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

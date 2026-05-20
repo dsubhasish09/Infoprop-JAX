@@ -30,19 +30,19 @@ from brax.training import replay_buffers
 from brax.training import types
 from brax.training.acme import running_statistics
 from brax.training.acme import specs
-from wheelbot_sim_python.algorithms.util.agent_learning import sac_losses
-from wheelbot_sim_python.algorithms.util.agent_learning import sac_networks
+from infoprop_jax.algorithms.util.agent_learning import sac_losses
+from infoprop_jax.algorithms.util.agent_learning import sac_networks
 from brax.training.types import Params
 from brax.training.types import Policy
 from brax.training.types import PRNGKey
 from flax.training.train_state import TrainState
 
-from wheelbot_sim_python.algorithms.util.custom_evaluator import CustomEvaluator
-from wheelbot_sim_python.algorithms.util.custom_wrapper import wrap_custom, wrap
-from wheelbot_sim_python.algorithms.util.model_learning.model_dataset import ReplayBufferPhysicsState
-from wheelbot_sim_python.algorithms.util.model_learning.model_trainer import compute_loss
-from wheelbot_sim_python.envs.wheelbot_brax_infoprop import Wheelbot as Model_Wheelbot
-from wheelbot_sim_python.envs.wheelbot_brax_mjx import Wheelbot as Real_Wheelbot
+from infoprop_jax.algorithms.util.custom_evaluator import CustomEvaluator
+from infoprop_jax.algorithms.util.custom_wrapper import wrap_custom, wrap
+from infoprop_jax.algorithms.util.model_learning.model_dataset import ReplayBufferPhysicsState
+from infoprop_jax.algorithms.util.model_learning.model_trainer import compute_loss
+from infoprop_jax.envs.infoprop_env import Wheelbot as Model_Wheelbot
+from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import Wheelbot as Real_Wheelbot
 
 State = envs.State
 Env = envs.Env

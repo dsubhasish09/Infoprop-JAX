@@ -14,15 +14,15 @@ agent_learning_rate: 0.0003
 agent_batch_size: 1024
 agent_hidden_layer_sizes: [256, 256]
 agent_layer_norm: False
-grad_updates_per_model_step: 1
+grad_updates_per_model_step: 10
 num_training_steps_per_model_train: 1000
 num_resampling_epochs: 10
-target_entropy: -1
+target_entropy: -1.0
 tau: 0.005
 tune_entropy: True
 alpha: 0.1
 reset_agent_per_trial: False
-reset_model_replay_buffer: False
+reset_model_replay_buffer: True
 reset_model_per_trial: False
 
 # model training config

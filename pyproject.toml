@@ -1,11 +1,11 @@
 [project]
-name = "wheelbot-sim-python"
+name = "infoprop-jax"
 version = "1.0"
-description = "JAX/Brax implementation of Infoprop Dyna for Mini Wheelbot racing."
+description = "JAX/Brax implementation of Infoprop Dyna."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "jax[cuda12]==0.7.0",
+    "jax[cuda12]==0.8.0",
     "brax",
     "hydra-core",
     "mediapy",
@@ -18,4 +18,11 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["wheelbot_sim_python*"]
+include = ["infoprop_jax*"]
+
+[tool.setuptools.package-data]
+infoprop_jax = [
+    "envs/wheelbot/assets/mjcf/*.xml",
+    "envs/wheelbot/assets/mjcf/mesh/*.stl",
+    "envs/wheelbot/assets/track/saved_tracks/*.npz",
+]

@@ -8,8 +8,8 @@ Generates closed-loop tracks by:
   4. Validating geometry (angle constraints, no self-intersections).
   5. Scaling and discretising boundaries to cone positions.
 
-100 pre-generated tracks are stored in saved_tracks/ and loaded at training time
-via load_track_by_seed(). New tracks can be generated with create_track().
+Pre-generated tracks are bundled in this package and loaded at training time via
+load_track_by_seed(). New tracks can be generated with create_track().
 """
 
 import numpy as np
@@ -18,6 +18,10 @@ import matplotlib.pyplot as plt
 from time import time
 import jax.numpy as jp
 import time
+from pathlib import Path
+
+
+TRACK_ASSET_DIR = Path(__file__).resolve().parent / "saved_tracks"
 
 class BadTrackException(Exception):
     pass
@@ -405,15 +409,15 @@ def load_track(filename):
 
 
 def load_track_by_seed(seed: int):
-    """Load the pre-generated track with the given integer seed from saved_tracks/."""
-    return load_track(f'saved_tracks/track_{seed}.npz')
+    """Load the pre-generated track with the given integer seed from bundled assets."""
+    return load_track(TRACK_ASSET_DIR / f'track_{seed}.npz')
 
 
 def main():
     start = time.time()
     for seed in range(100):
         track = create_track(seed=seed, zoom_factor=0.09)
-        save_track(track, f'saved_tracks/track_{seed}.npz')
+        save_track(track, TRACK_ASSET_DIR / f'track_{seed}.npz')
         track_loaded = load_track_by_seed(seed)
         assert jp.all(track['centerline'] == track_loaded['centerline'])
         assert jp.all(track['inner_cones'] == track_loaded['inner_cones'])

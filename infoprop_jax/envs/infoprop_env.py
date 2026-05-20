@@ -28,10 +28,14 @@ from brax.envs.base import PipelineEnv, State
 import mediapy as media
 from omegaconf import dictconfig, OmegaConf
 
-from .utils import compute_line_element
-from ..track.generator import create_track, load_track_by_seed
-from .trajectory import Trajectory, pad_line_segments_to_size, points_to_line_segemnt
-from wheelbot_sim_python.algorithms.util.model_learning.model_trainer import ModelTrainer
+from infoprop_jax.envs.wheelbot.utils import compute_line_element
+from infoprop_jax.envs.wheelbot.assets.track.generator import create_track, load_track_by_seed
+from infoprop_jax.envs.wheelbot.trajectory import (
+    Trajectory,
+    pad_line_segments_to_size,
+    points_to_line_segemnt,
+)
+from infoprop_jax.algorithms.util.model_learning.model_trainer import ModelTrainer
 
 
 def Rx(theta):
@@ -164,7 +168,9 @@ _ROLL_CTRL_INDICES = jp.array([1, 4, 8, 9])
 _EULER_RATE_IDX = jp.array([2, 5, 6])   # roll_dot, pitch_dot, yaw_dot
 _BODY_VEL_IDX   = jp.array([7, 8, 9])  # body vx, vy, vz
 
-WHEELBOT_ROOT_PATH = epath.Path(epath.resource_path('wheelbot_sim_python'))
+WHEELBOT_ASSET_PATH = (
+    epath.Path(epath.resource_path('infoprop_jax')) / 'envs' / 'wheelbot' / 'assets'
+)
 
 #create trajectories statically to be used in reset method.
 tracks = [load_track_by_seed(i) for i in range(200)]
@@ -198,7 +204,7 @@ class Wheelbot(PipelineEnv):
       fast_model_rollout: bool = False,
       **kwargs,
   ):
-    mjcf_path = (WHEELBOT_ROOT_PATH / 'mjcf').as_posix()
+    mjcf_path = (WHEELBOT_ASSET_PATH / 'mjcf').as_posix()
     xml_path = mjcf_path + '/wheelbot_alpha.xml'
     xml_str = epath.Path(xml_path).read_text()
 
