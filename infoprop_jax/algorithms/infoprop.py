@@ -41,7 +41,7 @@ from infoprop_jax.algorithms.util.custom_evaluator import CustomEvaluator
 from infoprop_jax.algorithms.util.custom_wrapper import wrap_custom, wrap
 from infoprop_jax.algorithms.util.model_learning.model_dataset import ReplayBufferPhysicsState
 from infoprop_jax.algorithms.util.model_learning.model_trainer import compute_loss
-from infoprop_jax.envs.infoprop_env import Wheelbot as Model_Wheelbot
+from infoprop_jax.envs.infoprop_env import InfopropEnv as Model_Wheelbot
 from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import Wheelbot as Real_Wheelbot
 
 State = envs.State

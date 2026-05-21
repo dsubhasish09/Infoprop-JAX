@@ -29,7 +29,7 @@ from brax.training.agents.sac import networks as sac_networks
 from omegaconf import OmegaConf
 
 from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import Wheelbot as RealWheelbot
-from infoprop_jax.envs.infoprop_env import Wheelbot as ModelWheelbot
+from infoprop_jax.envs.infoprop_env import InfopropEnv as ModelWheelbot
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

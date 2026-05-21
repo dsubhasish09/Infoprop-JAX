@@ -15,7 +15,7 @@ import os
 from brax import envs
 from infoprop_jax.algorithms import infoprop
 from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import Wheelbot
-from infoprop_jax.envs.infoprop_env import Wheelbot as Wheelbot_Infoprop
+from infoprop_jax.envs.infoprop_env import InfopropEnv as Wheelbot_Infoprop
 from brax.io import model
 import jax
 import jax.numpy as jp
