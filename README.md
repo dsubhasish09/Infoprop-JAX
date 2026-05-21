@@ -139,13 +139,6 @@ python -m infoprop_jax.main \
    algorithm.max_rollout_length=<value>
 ```
 
-**Resume from a checkpoint** (automatic if a checkpoint exists in the Hydra output dir):
-```bash
-python -m infoprop_jax.main \
-    hydra.run.dir=exp/2025-01-01_12-00-00 \
-    algorithm.auto_resume=true
-```
-
 ## Key Configuration
 
 Configuration is split across YAML files under `infoprop_jax/config/` that compose via Hydra defaults. The concrete values live in those YAMLs, not in this README.
