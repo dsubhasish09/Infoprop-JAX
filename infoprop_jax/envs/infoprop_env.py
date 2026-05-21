@@ -1,5 +1,5 @@
 """
-Wheelbot model-based environment for InfoProp Dyna rollouts.
+InfopropEnv: model-based environment for InfoProp Dyna rollouts.
 
 This environment replaces MuJoCo physics with a learned probabilistic ensemble model.
 Each step applies the InfoProp Dyna mechanism:
@@ -181,14 +181,14 @@ trajectory_lengths = jp.array([t.shape[0] for t in trajectories])
 max_length = max(trajectory_lengths)
 trajectories_flattened = jp.array([pad_line_segments_to_size(t, max_length) for t in trajectories])
 
-class Wheelbot(PipelineEnv):
+class InfopropEnv(PipelineEnv):
   """Brax environment backed by the learned InfoProp ensemble dynamics model.
 
   Extends the MJX environment interface so it can be used as a drop-in replacement
   during model-based rollouts. Carries InfoProp-specific state: Kalman gains,
   conditional variances, and accumulated entropy.
 
-  Key attributes (beyond base Wheelbot):
+  Key attributes (beyond base PipelineEnv):
       model_state: Flax TrainState for the probabilistic ensemble.
       per_step_cutoff: Lambda_1 — maximum allowed per-step information loss.
       accumulated_cutoff: Lambda_2 — maximum allowed cumulative information loss.

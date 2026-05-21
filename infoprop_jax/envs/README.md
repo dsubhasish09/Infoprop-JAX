@@ -8,7 +8,7 @@ Training currently uses two Brax `PipelineEnv` implementations with the same int
 
 | File | Role |
 |---|---|
-| `infoprop_env.py` | Model-based environment used for parallel Infoprop rollouts. It still uses the Wheelbot state/action/trajectory helpers in this refactor step. |
+| `infoprop_env.py` | Model-based environment (`InfopropEnv`) used for parallel Infoprop rollouts. Uses Wheelbot state/action/trajectory helpers. |
 | `wheelbot/wheelbot_brax_mjx.py` | Wheelbot MuJoCo/MJX ground-truth environment used for data collection and evaluation. |
 
 During training, `training_scripts/brax_infoprop_train.py` registers both under different Brax names and passes them to `algorithms.infoprop.train()`.
