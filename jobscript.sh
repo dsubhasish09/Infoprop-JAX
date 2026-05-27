@@ -17,6 +17,11 @@ module load FFmpeg
 
 export MUJOCO_GL=egl
 
+# Prevent JAX from pre-allocating 75% of GPU memory at import time.
+# Without this, JAX grabs a fixed chunk before any array is created,
+# causing OOM on large replay buffers.
+export XLA_PYTHON_CLIENT_PREALLOCATE=false
+
 python -m infoprop_jax.main \
     algorithm=infoprop \
     experiment=latest_repo_smoke_test \
