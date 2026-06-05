@@ -41,6 +41,7 @@ def _update_jit(
     act_history: int,
     obs_size: int,
     act_size: int,
+    dt: float,
     rng: jax.Array,
 ) -> Tuple[TrainState, Dict[str, float]]:
     """JIT-compiled wrapper: call update_nll and return updated model + normalisation stats."""
@@ -49,7 +50,8 @@ def _update_jit(
         update_nll(model, batch, obs_mean, obs_std, next_state_delta_mean, next_state_delta_std, obs_history,
         act_history,
         obs_size,
-        act_size,),
+        act_size,
+        dt,),
         obs_mean,
         obs_std,
         next_state_delta_mean,
@@ -70,10 +72,11 @@ def compute_loss(
     act_history: int,
     obs_size: int,
     act_size: int,
+    dt: float,
     rng: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
     """Compute mean NLL across all ensemble members (for early-stopping / validation)."""
-    return per_ensemble_nll(model, batch, obs_mean, obs_std, next_state_delta_mean, next_state_delta_std, obs_history, act_history, obs_size, act_size).mean()
+    return per_ensemble_nll(model, batch, obs_mean, obs_std, next_state_delta_mean, next_state_delta_std, obs_history, act_history, obs_size, act_size, dt).mean()
 
 
 @functools.partial(jax.jit)
@@ -159,7 +162,7 @@ class ModelTrainer(NamedTuple):
         _next_state_delta_std = jnp.ones(self.observation_size)
         return model, _elites, _obs_mean, _obs_std, _next_state_delta_mean, _next_state_delta_std, _rng
 
-    def update_step(self, batch: Dataset, model, obs_mean, obs_std, next_state_delta_mean, next_state_delta_std, obs_history, act_history, obs_size, act_size, rng) -> Dict[str, float]:
+    def update_step(self, batch: Dataset, model, obs_mean, obs_std, next_state_delta_mean, next_state_delta_std, obs_history, act_history, obs_size, act_size, dt, rng) -> Dict[str, float]:
         """Apply one NLL gradient step to the model using the provided batch."""
         train_rng, rng = jax.random.split(rng)
         (new_model, obs_mean, obs_std, next_state_delta_mean, next_state_delta_std, train_rng) = _update_jit(
@@ -173,6 +176,7 @@ class ModelTrainer(NamedTuple):
             act_history,
             obs_size,
             act_size,
+            dt,
             train_rng,
         )
 

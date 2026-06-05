@@ -42,7 +42,7 @@ from infoprop_jax.algorithms.util.custom_wrapper import wrap_custom, wrap
 from infoprop_jax.algorithms.util.model_learning.model_dataset import ReplayBufferPhysicsState
 from infoprop_jax.algorithms.util.model_learning.model_trainer import compute_loss
 from infoprop_jax.envs.infoprop_env import InfopropEnv as Model_Wheelbot
-from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import Wheelbot as Real_Wheelbot
+from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import WheelbotEnv as Real_Wheelbot
 
 State = envs.State
 Env = envs.Env
@@ -256,6 +256,13 @@ def train(
       ... (remaining args are passed through from Hydra config)
   """
 #   jax.config.update("jax_log_compiles", True)
+  # Model-state dimensions and control timestep, sourced from the model environment
+  # so the generic loop carries no Wheelbot-specific magic numbers.
+  model_state_size = model_environment.model_state_size
+  context_size = model_environment.context_size
+  full_state_size = model_environment.full_state_size
+  model_action_size = model_environment.action_size
+  model_dt = model_environment.dt
   process_id = jax.process_index()
   local_devices_to_use = 1
   device_count = 1
@@ -367,7 +374,7 @@ def train(
       reward=0.0,
       discount=0.0,
       next_observation=dummy_obs,
-      extras={'state_extras': {'truncation': 0.0, 'track_seed': 0,'invariant_physics_state':jnp.zeros((5,))}, 'policy_extras': {}},
+      extras={'state_extras': {'truncation': 0.0, 'track_seed': 0,'invariant_physics_state':jnp.zeros((context_size,))}, 'policy_extras': {}},
   )
   # model replay buffer
   model_replay_buffer =  replay_buffers.UniformSamplingQueue(
@@ -383,20 +390,10 @@ def train(
   )
 
 
-  # need to make this adaptive
-  #physics replay buffer
-  dummy_obs_history = jnp.zeros((11 * obs_history,))
-  dummy_obs = jnp.zeros((11,))
-  dummy_action_history = jnp.zeros((2 * act_history,))
-  dummy_action = jnp.zeros((2,))
-  dummy_transition = Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
-      observation=jnp.concatenate([dummy_obs_history, dummy_action_history], axis=-1),
-      action=dummy_action,
-      reward=0.0,
-      discount=0.0,
-      next_observation=dummy_obs,
-      extras={'state_extras': {'truncation': 0.0, 'track_seed': 0, 'invariant_physics_state':jnp.zeros((5,))}, 'policy_extras': {}},
-  )
+  # physics replay buffer — schema (and its context state_extras) provided by the
+  # real env so the loop carries no env-specific field names.
+  dummy_transition = environment.dummy_physics_transition
+  physics_extra_fields = tuple(dummy_transition.extras['state_extras'].keys())
   replay_buffer_physics_state = ReplayBufferPhysicsState(
       max_replay_size=max_physics_replay_size // device_count,
       dummy_data_sample=dummy_transition,
@@ -444,8 +441,9 @@ def train(
                 next_state_delta_std,
             obs_history,
             act_history,
-            11,
-            2,
+            model_state_size,
+            model_action_size,
+            model_dt,
                 curr_rng,
             )
 
@@ -470,8 +468,8 @@ def train(
     model_inp = jnp.concatenate((obs, action), axis=-1)
     model_obs_mean = jnp.mean(model_inp, axis=0)
     model_obs_std = jnp.std(model_inp, axis=0)
-    curr_obs = obs[:, (obs_history -1) * 11 : obs_history *11]
-    target = (next_obs - curr_obs) / 0.006
+    curr_obs = obs[:, (obs_history -1) * model_state_size : obs_history * model_state_size]
+    target = (next_obs - curr_obs) / model_dt
     next_state_delta_mean = jnp.mean(target, axis=0)
     next_state_delta_std = jnp.std(target, axis=0)
 
@@ -529,8 +527,9 @@ def train(
             next_state_delta_std,
             obs_history,
             act_history,
-            11,
-            2,
+            model_state_size,
+            model_action_size,
+            model_dt,
             loss_key,
         )
         improved = loss_ < loss
@@ -589,8 +588,9 @@ def train(
         next_state_delta_std,
         obs_history,
         act_history,
-        11,
-        2,
+        model_state_size,
+        model_action_size,
+        model_dt,
         key,
     )
     return training_state, loss
@@ -646,42 +646,19 @@ def train(
 
     model_dataset_val = full_transitions
 
-    curr_physics_state = model_dataset_val.observation[:, (obs_history -1) * 11 : obs_history *11]
-    curr_odom_state = jnp.zeros((curr_physics_state.shape[0], 5))
+    curr_physics_state = model_dataset_val.observation[:, (obs_history -1) * model_state_size : obs_history * model_state_size]
+    curr_odom_state = jnp.zeros((curr_physics_state.shape[0], context_size))
     applied_torque = model_dataset_val.action
     # Forward pass through the ensemble: each of the E members predicts (mean, logvar)
     means_, logvars_ = model_.apply_fn(
             {"params": model_.params}, model_dataset_val.observation, applied_torque, model_obs_mean, model_obs_std
         )
-    # Rescale model output variances to physical units (undo normalisation, apply dt)
-    dt = model_environment.dt
-    VARS = jnp.exp(logvars_)
-    vars_ = VARS * (next_state_delta_std + 1e-6) ** 2 * dt ** 2
-    R = jax.vmap(YRP)(curr_odom_state[:,0], curr_physics_state[:,0], curr_physics_state[:,1])[:,None, :,:]
-    vars__1 = (dt/2) ** 2 * vars_[:,:,_EULER_RATE_IDX]
-    # x,y variance from body_vel propagation; z variance comes from model directly at index 10
-    vars__2 = (dt/2) ** 2 * (jnp.square(R) @ vars_[:,:,_BODY_VEL_IDX, None]).squeeze(-1)[:,:,:2]
-    vars__ = jnp.concatenate((vars__1, vars__2), axis=-1)
-    vars = jnp.concatenate((vars_, vars__), axis=-1)
-    means_ = (means_ * (next_state_delta_std + 1e-6) + next_state_delta_mean) * dt + curr_physics_state[:, None, :]
-    means__1 = curr_odom_state[:,None, 0:3] + dt * (curr_physics_state[:,_EULER_RATE_IDX][:,None,:] + means_[:,:,_EULER_RATE_IDX]) / 2
-    # x,y integration only; z is now directly predicted by the model at physics_state index 10
-    means__2 = curr_odom_state[:,None, 3:5] + dt * (R @ curr_physics_state[:,_BODY_VEL_IDX][:,None,:, None] + R @ means_[:,:,_BODY_VEL_IDX][:,:,:,None]).squeeze(-1)[:,:,:2] / 2
-    means__ = jnp.concatenate((means__1, means__2), axis=-1)
-    means = jnp.concatenate((means_, means__), axis=-1)
-
-    # Precision-weighted fusion of ensemble predictions (inverse-variance pooling)
-    inv_vars = 1 / (vars + 1e-12)
-    fused_var = 1 / jnp.mean(inv_vars, axis=1)
-    fused_mean = fused_var * jnp.mean(means * inv_vars, axis=1)
-    # Epistemic variance: disagreement between ensemble means
-    epist_var = jnp.mean((means - fused_mean[:, None, :]) ** 2, axis=1)
-    # Kalman gain: K = Sigma_GT / (Sigma_GT + Sigma_epist)
-    kalman_gain = jnp.clip((fused_var) / (fused_var + epist_var), 0, 1)
-    conditional_var = ((1 - kalman_gain) * fused_var)
-
-    # Per-step information loss H(s_tilde): differential entropy of the filtered state
-    diff_entropy = 0.5 * jnp.log2(2 * jnp.pi * jnp.e * conditional_var)
+    # Decode + augment + fuse + per-step differential entropy. Delegated to the env so the
+    # uncertainty-propagation math lives in one place (env.augment_prediction), shared with
+    # the rollout step rather than duplicated here.
+    diff_entropy = model_environment.batched_diff_entropy(
+        means_, logvars_, curr_physics_state, curr_odom_state,
+        next_state_delta_mean, next_state_delta_std)
     binning_entropy = jnp.quantile(diff_entropy, lower_quantile, axis=0) - 1
     conditional_entropy = jnp.clip(diff_entropy - binning_entropy, 0, None)
 
@@ -727,7 +704,6 @@ def train(
         actions, policy_extras = policy(env_state.obs, key)
         nstate = env.step(env_state, actions)
         state_extras = {x: nstate.info[x] for x in extra_fields}
-        next_state = nstate.info['physics_state']
         return nstate, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
             observation=env_state.obs,
             action=actions,
@@ -735,15 +711,8 @@ def train(
             discount=1 - nstate.done,
             next_observation=nstate.obs,
             extras={'policy_extras': policy_extras, 'state_extras': state_extras},
-        ), Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
-            observation=jnp.concatenate([env_state.info['phys_state_history'], env_state.info['act_history']], axis=-1),
-            action=nstate.info['applied_torque'],
-            reward=jnp.zeros(nstate.reward.shape, dtype=jnp.float32),
-            discount=1 - nstate.done,
-            next_observation=next_state,
-            extras={'policy_extras': policy_extras, 'state_extras': state_extras},
-        )
-  
+        ), environment.extract_physics_transition(env_state, nstate, policy_extras)
+
   def random_actor_step(
     env: Env,
     env_state: State,
@@ -752,11 +721,10 @@ def train(
     extra_fields: Sequence[str] = (),
         ) -> Tuple[State, Transition]:
         """Carries out one step using a random policy in the real environment."""
-        actions = jax.random.uniform(key, (env_state.obs.shape[0], 2), minval=-1.0, maxval=1.0)
+        actions = jax.random.uniform(key, (env_state.obs.shape[0], model_action_size), minval=-1.0, maxval=1.0)
         policy_extras = {}
         nstate = env.step(env_state, actions)
         state_extras = {x: nstate.info[x] for x in extra_fields}
-        next_state = nstate.info['physics_state']
         return nstate, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
             observation=env_state.obs,
             action=actions,
@@ -764,15 +732,8 @@ def train(
             discount=1 - nstate.done,
             next_observation=nstate.obs,
             extras={'policy_extras': policy_extras, 'state_extras': state_extras},
-        ), Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
-            observation=jnp.concatenate([env_state.info['phys_state_history'], env_state.info['act_history']], axis=-1),
-            action=nstate.info['applied_torque'],
-            reward=jnp.zeros(nstate.reward.shape, dtype=jnp.float32),
-            discount=1 - nstate.done,
-            next_observation=next_state,
-            extras={'policy_extras': policy_extras, 'state_extras': state_extras},
-        )
-  
+        ), environment.extract_physics_transition(env_state, nstate, policy_extras)
+
   def get_experience(
       normalizer_params: running_statistics.RunningStatisticsState,
       policy_params: Params,
@@ -789,7 +750,7 @@ def train(
     policy = make_policy((normalizer_params, policy_params))
     # curr_state = jnp.concatenate([*env_state.pipeline_state.qpos, *env_state.pipeline_state.qvel], axis=-1)
     env_state, transitions, transitions_state = actor_step(
-        env, env_state, policy, key, extra_fields=('truncation','track_seed','invariant_physics_state',)
+        env, env_state, policy, key, extra_fields=physics_extra_fields
     )
 
     normalizer_params = running_statistics.update(
@@ -817,7 +778,7 @@ def train(
     policy = make_policy((normalizer_params, policy_params))
     # curr_state = jnp.concatenate([*env_state.pipeline_state.qpos, *env_state.pipeline_state.qvel], axis=-1)
     env_state, transitions, transitions_state = random_actor_step(
-        env, env_state, policy, key, extra_fields=('truncation','track_seed','invariant_physics_state',)
+        env, env_state, policy, key, extra_fields=physics_extra_fields
     )
 
     normalizer_params = running_statistics.update(

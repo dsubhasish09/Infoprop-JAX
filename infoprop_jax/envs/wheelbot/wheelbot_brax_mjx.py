@@ -33,7 +33,9 @@ import mujoco
 from mujoco import mjx
 from brax.io import mjcf
 from brax.envs.base import PipelineEnv, State
+from brax.training.types import Transition
 from brax import envs
+from infoprop_jax.envs.infoprop_wrappable_env import InfopropWrappable
 import mediapy as media
 from omegaconf import dictconfig, OmegaConf
 import xml.etree.ElementTree as ET
@@ -182,6 +184,9 @@ def get_projected_velocity(State):
 _VARIANT_INDICES = jp.array([1, 2, 3, 4, 5, 7, 9])
 _PITCH_CTRL_INDICES = jp.array([2, 5, 6, 7])
 _ROLL_CTRL_INDICES = jp.array([1, 4, 8, 9])
+# Physics-state column indices used in the model's odometry integration
+_EULER_RATE_IDX = jp.array([2, 5, 6])   # roll_dot, pitch_dot, yaw_dot
+_BODY_VEL_IDX = jp.array([7, 8, 9])     # body vx, vy, vz
 
 WHEELBOT_ASSET_PATH = (
     epath.Path(epath.resource_path('infoprop_jax')) / 'envs' / 'wheelbot' / 'assets'
@@ -197,11 +202,16 @@ max_length = max(trajectory_lengths)
 trajectories_flattened = jp.array([pad_line_segments_to_size(t, max_length) for t in trajectories])
 
 
-class Wheelbot(PipelineEnv):
-    """Brax PipelineEnv backed by MuJoCo-MJX physics.
+class WheelbotEnv(InfopropWrappable):
+    """Wheelbot MJX env: real MuJoCo-MJX physics + the Infoprop hooks.
+
+    As an ``InfopropWrappable`` it is both the ground-truth data-collection / eval env
+    (via its real ``step``) and the env that ``InfopropEnv`` wraps for learned-dynamics
+    rollouts (via ``preprocess`` / ``augment_prediction`` / ``postprocess``). The
+    ``preprocess`` hook also applies the balancing prior. The two roles share one
+    observation, reward and state layout.
 
     Attributes (beyond base PipelineEnv):
-        trajectory: Trajectory object for the active track.
         K_roll / K_pitch: Linear balancing controller gains (4D each).
         meas_noise_std / process_noise_std: Per-state noise standard deviations.
         obs_history / act_history: Number of past steps included in the observation.
@@ -304,20 +314,51 @@ class Wheelbot(PipelineEnv):
         self.process_noise_std = jp.array(process_std) if process_std is not None else None
         _enc = self.sin_cos_encoding
         self._obs_slice_start = (3 if _enc else 2) * self.lookahead + (3 if _enc else 2)
+        # Dimensions of the learned model state (see infoprop_env.py for the split).
+        self.model_state_size = 11
+        self.context_size = 5
+        self.full_state_size = self.model_state_size + self.context_size
 
-    def shift_action(self, curr_act_history: jp.ndarray, to_add: jp.ndarray) -> jp.ndarray:
-        """Shift the action history queue by one step."""
-        if self.act_history == 0:
-            return curr_act_history
-        act_history = jp.concatenate([curr_act_history[2:], to_add])
-        return act_history
+    # ---------------------------------------------------- physics-buffer data contract
+    @property
+    def dummy_physics_transition(self) -> Transition:
+        """Zero-filled transition that sizes the physics replay buffer and declares the
+        per-transition context fields (``state_extras``) carried for model training and
+        consumed by the model env's ``reset_from_buffer``."""
+        ms, oh, ah = self.model_state_size, self.obs_history, self.act_history
+        return Transition(
+            observation=jp.zeros(ms * oh + self.action_size * ah),
+            action=jp.zeros(self.action_size),
+            reward=0.0,
+            discount=0.0,
+            next_observation=jp.zeros(ms),
+            extras={'state_extras': {'truncation': 0.0, 'track_seed': 0,
+                                     'invariant_physics_state': jp.zeros(self.context_size)},
+                    'policy_extras': {}},
+        )
 
-    def shift_phys(self, curr_phys_history: jp.ndarray, to_add: jp.ndarray) -> jp.ndarray:
-        """Shift the physics-state history queue by one step."""
-        if self.obs_history == 0:
-            return curr_phys_history
-        phys_history = jp.concatenate([curr_phys_history[11:], to_add])
-        return phys_history
+    def extract_physics_transition(self, prev_state: State, next_state: State, policy_extras) -> Transition:
+        """Build the (model_state_history+action_history -> next_model_state) transition
+        with its context extras, from this env's own `info` keys."""
+        state_extras = {
+            'truncation': next_state.info['truncation'],
+            'track_seed': next_state.info['track_seed'],
+            'invariant_physics_state': next_state.info['invariant_physics_state'],
+        }
+        return Transition(
+            observation=jp.concatenate(
+                [prev_state.info['phys_state_history'], prev_state.info['act_history']], axis=-1),
+            action=next_state.info['applied_torque'],
+            reward=jp.zeros(next_state.reward.shape, dtype=jp.float32),
+            discount=1 - next_state.done,
+            next_observation=next_state.info['physics_state'],
+            extras={'policy_extras': policy_extras, 'state_extras': state_extras},
+        )
+
+    @property
+    def reset_carry_keys(self):
+        """Env-owned dynamic info keys the real-env auto-reset wrapper reverts on `done`."""
+        return ['physics_state', 'invariant_physics_state', 'applied_torque']
 
     def _get_obs(self, data: mjx.Data, action: jp.ndarray, track_seed: int) -> jp.ndarray:
         """Construct the observation vector: trajectory features + masked robot state history."""
@@ -422,9 +463,9 @@ class Wheelbot(PipelineEnv):
         obs = self._get_obs(data, action, track_seed)
 
         # Initialize history arrays with zeros.
-        act_history_array = jp.zeros(2 * self.act_history) if self.act_history > 0 else jp.array([])
+        act_history_array = jp.zeros(self.action_size * self.act_history) if self.act_history > 0 else jp.array([])
         phys_state_history_array = (
-            jp.zeros(11 * self.obs_history) if self.obs_history > 0 else jp.array([])
+            jp.zeros(self.model_state_size * self.obs_history) if self.obs_history > 0 else jp.array([])
         )
 
         robot_state = qpos_qvel_to_robot_state(data.qpos, data.qvel)
@@ -498,9 +539,9 @@ class Wheelbot(PipelineEnv):
         obs = self._get_obs(data, action, self.track_seed)
 
         # Initialize history arrays with zeros.
-        act_history_array = jp.zeros(2 * self.act_history) if self.act_history > 0 else jp.array([])
+        act_history_array = jp.zeros(self.action_size * self.act_history) if self.act_history > 0 else jp.array([])
         phys_state_history_array = (
-            jp.zeros(11 * self.obs_history) if self.obs_history > 0 else jp.array([])
+            jp.zeros(self.model_state_size * self.obs_history) if self.obs_history > 0 else jp.array([])
         )
 
         robot_state = qpos_qvel_to_robot_state(data.qpos, data.qvel)
@@ -668,3 +709,189 @@ class Wheelbot(PipelineEnv):
         info['reward_metrics'] = reward_metrics
 
         return state.replace(reward=reward, done=done, info=info)
+
+    # ============================================================ Infoprop hooks
+    def preprocess(self, state: State, action: jp.ndarray):
+        """Build the NN inputs and the applied torque from the State + RL action.
+
+        Returns ``(nn_input, curr_model_state, curr_context, applied_torque,
+        action_clipped)``. The applied torque is the RL action scaled and added to the
+        linear balancing prior (the Wheelbot's control prior); ``action_clipped`` is the
+        RL action used for observation/reward.
+        """
+        nn_input = jp.concatenate(
+            [state.info['phys_state_history'], state.info['act_history']], axis=-1)
+        robot_state = state.obs[self._obs_slice_start:]
+        action_clipped = jp.clip(action, -1, 1)
+        driving_wheel_torque = -self.K_pitch @ robot_state[_PITCH_CTRL_INDICES]
+        balancing_wheel_torque = -self.K_roll @ robot_state[_ROLL_CTRL_INDICES]
+        LC_torque = jp.array([driving_wheel_torque, balancing_wheel_torque])
+        applied_torque = jp.clip(
+            self.action_scale * action_clipped + LC_torque, -self.action_lim, self.action_lim)
+        return (nn_input, state.info['physics_state'], state.info['invariant_physics_state'],
+                applied_torque, action_clipped)
+
+    def augment_prediction(self, member_mean, member_var, curr_model_state, curr_context):
+        """Append the 5 integrated odometry dims (yaw, drive/balance angle, x, y) and
+        propagate their variance. Single rollout sample: ``[E, model_state_size]`` in."""
+        dt = self.dt
+        means_, vars_ = member_mean, member_var
+        curr_physics_state, curr_odom_state = curr_model_state, curr_context
+        R = jax.vmap(YRP)(curr_odom_state[None, 0], curr_physics_state[None, 0], curr_physics_state[None, 1])
+        means__1 = curr_odom_state[None, 0:3] + dt * (curr_physics_state[None, _EULER_RATE_IDX] + means_[:, _EULER_RATE_IDX]) / 2
+        # x,y integration only; z is directly predicted by the model at physics_state index 10
+        means__2 = curr_odom_state[None, 3:5] + dt * (R @ curr_physics_state[None, _BODY_VEL_IDX, None] + R @ means_[:, _BODY_VEL_IDX, None]).squeeze(axis=-1)[:, :2] / 2
+        means__ = jp.concatenate((means__1, means__2), axis=-1)
+        full_mean = jp.concatenate((means_, means__), axis=-1)
+
+        vars__1 = (dt / 2) ** 2 * vars_[:, _EULER_RATE_IDX]
+        vars__2 = (dt / 2) ** 2 * (jp.square(R) @ vars_[:, _BODY_VEL_IDX, None]).squeeze(-1)[:, :2]
+        vars__ = jp.concatenate((vars__1, vars__2), axis=-1)
+        full_var = jp.concatenate((vars_, vars__), axis=-1)
+        return full_mean, full_var
+
+    def _get_obs_from_states(self, physics_state, invariant_physics_state, track_seed):
+        """Construct observation directly from variant and invariant state (fast rollout)."""
+        robot_state = jp.array([
+            invariant_physics_state[0],
+            *physics_state[:5],
+            invariant_physics_state[1],
+            physics_state[5],
+            invariant_physics_state[2],
+            physics_state[6],
+        ])
+        trajectory = get_trajectory_by_seed(track_seed, self.lookahead)
+        traj_state = trajectory.get_state(
+            invariant_physics_state[3:5], invariant_physics_state[0], self.sin_cos_encoding)
+        robot_state_masked = robot_state * self.robot_state_mask
+        extras = jp.array([physics_state[-1], *physics_state[7:10]])
+        return jp.array([*traj_state, *robot_state_masked, *extras])
+
+    def _get_model_data_and_obs(self, state, physics_state, invariant_physics_state,
+                                action, track_seed, build_pipeline_state):
+        """Build the next pipeline state (optional) and observation for a model rollout step."""
+        if not build_pipeline_state:
+            return None, self._get_obs_from_states(physics_state, invariant_physics_state, track_seed)
+        robot_state = jp.array([
+            invariant_physics_state[0],
+            *physics_state[:5],
+            invariant_physics_state[1],
+            physics_state[5],
+            invariant_physics_state[2],
+            physics_state[6],
+        ])
+        qpos, qvel = robot_state_to_qpos_qvel(robot_state)
+        qpos = qpos.at[0:3].set(jp.concatenate([invariant_physics_state[-2:], physics_state[-1:]]))
+        qvel = qvel.at[0:3].set(
+            (YRP(invariant_physics_state[0], physics_state[0], physics_state[1])
+             @ physics_state[7:10][:, None]).squeeze(-1))
+        data = self.pipeline_init(qpos, qvel)
+        return data, self._get_obs(data, action, track_seed)
+
+    def postprocess(self, state, applied_action, next_model_state, next_context,
+                    processed_action, build_pipeline_state):
+        """Rebuild the MJX-shaped State, env-owned `info`, and reward from a prediction.
+
+        The framework-owned rng + entropy accumulation are already set on ``state``.
+        """
+        track_seed = state.info['track_seed']
+        data, obs = self._get_model_data_and_obs(
+            state, next_model_state, next_context, processed_action, track_seed, build_pipeline_state)
+        info = state.info
+        info['applied_torque'] = applied_action
+        info['physics_state'] = next_model_state
+        info['invariant_physics_state'] = next_context
+        info['phys_state_history'] = self.shift_phys(info['phys_state_history'], next_model_state)
+        info['act_history'] = self.shift_action(info['act_history'], applied_action)
+        state = state.replace(info=info, pipeline_state=data, obs=obs)
+
+        reward, done, reward_metrics = self._get_rew(state, processed_action)
+        info['reward_metrics'] = reward_metrics
+        return state.replace(reward=reward, done=done, info=info)
+
+    def reset_from_buffer(self, rng, init_transition, build_pipeline_state):
+        """Reset a model rollout from a sampled real-data physics transition."""
+        init_history = init_transition.observation
+        track_seed = init_transition.extras['state_extras']['track_seed']
+        invariant = init_transition.extras['state_extras']['invariant_physics_state']
+        return self.reset_with_init_robot_state(
+            rng, init_history, track_seed, invariant[3:5], invariant[0], build_pipeline_state)
+
+    def reset_with_init_robot_state(self, rng, init_history, track_seed, init_xy, init_angle,
+                                    build_pipeline_state):
+        """Reset using a provided model-state history and global position.
+
+        Used during episodic resampling: initial states are drawn from the real-data
+        replay buffer so that model rollouts branch from states grounded in real experience.
+        """
+        rng, track_key = jax.random.split(rng)
+        track_seed = jax.random.randint(track_key, shape=(), minval=0, maxval=200)
+        trajectory = get_trajectory_by_seed(track_seed)
+        rng, pos_key = jax.random.split(rng)
+        init_xy, init_angle = trajectory.get_rand_init_pos(pos_key)
+        rng, xy_key = jax.random.split(rng)
+        d = jp.clip(jax.random.normal(xy_key, shape=()) * self.init_xy_std, -track_width / 2, track_width / 2)
+        perp_dir = jp.array([-jp.sin(init_angle), jp.cos(init_angle)])
+        init_xy = init_xy + d * perp_dir
+        rng, angle_key = jax.random.split(rng)
+        offset_angle = jp.clip(jax.random.normal(angle_key, shape=init_angle.shape) * self.init_angle_std, -jp.pi, jp.pi)
+        init_angle = init_angle + offset_angle
+
+        ms = self.model_state_size
+        init_physics_state_history = init_history[:ms * self.obs_history]
+        init_action_history = init_history[ms * self.obs_history:]
+        init_physics_state = init_physics_state_history[-ms:]
+        init_robot_state = jp.array([init_angle, *(init_physics_state[:5]), 0, init_physics_state[5], 0, init_physics_state[6]])
+
+        qpos, qvel = robot_state_to_qpos_qvel(init_robot_state)
+        qpos = qpos.at[:2].set(init_xy)
+        qpos = qpos.at[2].set(init_physics_state[-1])
+        qvel = qvel.at[:3].set((YRP(init_angle, init_physics_state[0], init_physics_state[1]) @ init_physics_state[7:10][:, None]).squeeze(-1))
+
+        data = self.pipeline_init(qpos, qvel)
+        obs = self._get_obs(data, jp.zeros(self.action_size), track_seed)
+        reward, done = jp.zeros(2)
+        reward_metrics = {'cross_track_rew': 0.0, 'cross_angle_rew': 0.0, 'driving_reward': 0.0, 'crash_penalty': 0.0}
+        info = {
+            'track_seed': track_seed,
+            'applied_torque': jp.zeros(self.action_size),
+            'physics_state': init_physics_state,
+            'accumulated_conditional_entropy': jp.zeros((self.full_state_size,)),
+            'current_conditional_entropy': jp.zeros((self.full_state_size,)),
+            'reward_metrics': reward_metrics,
+            'invariant_physics_state': jp.array([init_angle, 0, 0, *(data.qpos[:2])]),
+            'act_history': init_action_history,
+            'phys_state_history': init_physics_state_history,
+        }
+        pipeline_state = data if build_pipeline_state else None
+        return State(pipeline_state, obs, reward, done, {}, info)
+
+    def reset_with_init_robot_state_eval(self, rng, init_history, track_seed, init_xy, init_angle):
+        """Deterministic reset for evaluation (always builds the pipeline_state for rendering)."""
+        ms = self.model_state_size
+        init_physics_state_history = init_history[:ms * self.obs_history]
+        init_action_history = init_history[ms * self.obs_history:]
+        init_physics_state = init_physics_state_history[-ms:]
+        init_robot_state = jp.array([init_angle, *(init_physics_state[:5]), 0, init_physics_state[5], 0, init_physics_state[6]])
+
+        qpos, qvel = robot_state_to_qpos_qvel(init_robot_state)
+        qpos = qpos.at[:2].set(init_xy)
+        qpos = qpos.at[2].set(init_physics_state[-1])
+        qvel = qvel.at[:3].set((YRP(init_angle, init_physics_state[0], init_physics_state[1]) @ init_physics_state[7:10][:, None]).squeeze(-1))
+
+        data = self.pipeline_init(qpos, qvel)
+        obs = self._get_obs(data, jp.zeros(self.action_size), track_seed)
+        reward, done = jp.zeros(2)
+        reward_metrics = {'cross_track_rew': 0.0, 'cross_angle_rew': 0.0, 'driving_reward': 0.0, 'crash_penalty': 0.0}
+        info = {
+            'track_seed': track_seed,
+            'applied_torque': jp.zeros(self.action_size),
+            'physics_state': init_physics_state,
+            'accumulated_conditional_entropy': jp.zeros((self.full_state_size,)),
+            'current_conditional_entropy': jp.zeros((self.full_state_size,)),
+            'reward_metrics': reward_metrics,
+            'invariant_physics_state': jp.array([init_angle, 0, 0, *(data.qpos[:2])]),
+            'act_history': init_action_history,
+            'phys_state_history': init_physics_state_history,
+        }
+        return State(data, obs, reward, done, {}, info)

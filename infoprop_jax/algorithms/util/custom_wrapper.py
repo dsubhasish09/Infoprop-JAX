@@ -73,39 +73,34 @@ class VmapInfopropWrapper(Wrapper):
         super().__init__(env)
         self.batch_size = batch_size
         self.replay_buffer = replay_buffer
-        self._vmap_first_half = jax.vmap(env.first_half_of_step)
-        self._vmap_second_half = jax.vmap(env.second_half_of_step)
 
     def reset(self, rng: jax.Array, physics_buffer_state) -> State:
         if self.batch_size is not None:
             rng = jax.random.split(rng, self.batch_size)
         n_envs = rng.shape[0]
-        physics_buffer_state, init_robot_transition = self.replay_buffer.get_model_dataset(
+        physics_buffer_state, init_transition = self.replay_buffer.get_model_dataset(
             rng[0], physics_buffer_state, max_samples=n_envs
         )
-        init_robot_state = init_robot_transition.observation
-        track_seed = init_robot_transition.extras['state_extras']['track_seed']
-        invariant_physics_state = init_robot_transition.extras['state_extras']['invariant_physics_state']
-        init_xy = invariant_physics_state[:, 3:5]
-        init_angle = invariant_physics_state[:, 0]
-        init_state = jax.vmap(self.env.reset_with_init_robot_state)(
-            rng, init_robot_state, track_seed, init_xy, init_angle
-        )
+        # The env owns how a sampled physics transition becomes an initial state.
+        build_pipeline_state = not self.env.fast_model_rollout
+        init_state = jax.vmap(self.env.reset_from_buffer, in_axes=(0, 0, None))(
+            rng, init_transition, build_pipeline_state)
         info = init_state.info
         info['info_cutoff'] = jp.zeros(n_envs)
         init_state = init_state.replace(info=info)
         return init_state
 
     def step(self, state: State, action: jax.Array) -> State:
-        """Vectorized step: pops plain model_params pytree from info, vmaps the
-        underlying env step across the ensemble batch, then reinserts model_params."""
+        """Vectorized step: pop the shared (non-per-env) info entries — model params,
+        normalisation stats, cutoffs and the autoreset counters — so they are not vmapped,
+        run the batched Infoprop step, then reinsert them."""
         info = state.info
         model_params = info.pop('model')
         obs_mean = info.pop('model_obs_mean')
         obs_std = info.pop('model_obs_std')
         next_state_delta_mean = info.pop('next_state_delta_mean')
         next_state_delta_std = info.pop('next_state_delta_std')
-        per_step_cut_off = info.pop('per_step_cutoff')
+        per_step_cutoff = info.pop('per_step_cutoff')
         accumulated_cutoff = info.pop('accumulated_cutoff')
         binning_entropy = info.pop('binning_entropy')
         num_inits = info.pop('num_inits')
@@ -113,24 +108,10 @@ class VmapInfopropWrapper(Wrapper):
 
         state = state.replace(info=info)
 
-        applied_torque, action_clipped = self._vmap_first_half(state, action)
-
-        next_physics_state, rng, conditional_entropy, next_odom_state = (
-            self.env.batched_model_step(
-                state, applied_torque, model_params, obs_mean, obs_std,
-                next_state_delta_mean, next_state_delta_std, binning_entropy,
-            )
-        )
-
-        next_state = self._vmap_second_half(
-            state, applied_torque, next_physics_state, action_clipped,
-            conditional_entropy, rng, next_odom_state,
-        )
-
-        next_state = self.env.batch_entropy_cutoff(
-            next_state, conditional_entropy,
-            next_state.info['accumulated_conditional_entropy'],
-            per_step_cut_off, accumulated_cutoff,
+        next_state = self.env.batched_step(
+            state, action, model_params, obs_mean, obs_std,
+            next_state_delta_mean, next_state_delta_std,
+            per_step_cutoff, accumulated_cutoff, binning_entropy,
         )
 
         info = next_state.info
@@ -139,7 +120,7 @@ class VmapInfopropWrapper(Wrapper):
         info['model_obs_std'] = obs_std
         info['next_state_delta_mean'] = next_state_delta_mean
         info['next_state_delta_std'] = next_state_delta_std
-        info['per_step_cutoff'] = per_step_cut_off
+        info['per_step_cutoff'] = per_step_cutoff
         info['accumulated_cutoff'] = accumulated_cutoff
         info['binning_entropy'] = binning_entropy
         info['num_inits'] = num_inits
@@ -211,23 +192,18 @@ class CustomAutoResetWrapper(Wrapper):
     def __init__(self, env: Env, reset_pipeline_state: bool = True):
         super().__init__(env)
         self.reset_pipeline_state = reset_pipeline_state
+        # Env-owned dynamic info keys (env-declared) plus the framework-owned entropy
+        # accumulators are reverted to their episode-start values on `done`.
+        self._carry_keys = list(env.reset_carry_keys) + [
+            'accumulated_conditional_entropy', 'current_conditional_entropy']
 
     def reset(self, rng: jax.Array, physics_buffer_state) -> State:
         state = self.env.reset(rng, physics_buffer_state)
         if self.reset_pipeline_state:
             state.info['first_pipeline_state'] = state.pipeline_state
         state.info['first_obs'] = state.obs
-        state.info['first_physics_state'] = state.info['physics_state']
-        state.info['first_accumulated_conditional_entropy'] = (
-            state.info['accumulated_conditional_entropy']
-        )
-        state.info['first_current_conditional_entropy'] = (
-            state.info['current_conditional_entropy']
-        )
-        state.info['first_applied_torque'] = state.info['applied_torque']
-        state.info['first_invariant_physics_state'] = state.info['invariant_physics_state']
-        state.info['first_phys_state_history'] = state.info['phys_state_history']
-        state.info['first_act_history'] = state.info['act_history']
+        for k in self._carry_keys:
+            state.info[f'first_{k}'] = state.info[k]
         state.info['num_inits'] = 0
         state.info['total_done_steps'] = 0
         return state
@@ -245,41 +221,20 @@ class CustomAutoResetWrapper(Wrapper):
                 d = done
             return jp.where(d, x, y)
 
-        first = {
-            'obs': state.info['first_obs'],
-            'physics_state': state.info['first_physics_state'],
-            'accumulated_conditional_entropy': state.info['first_accumulated_conditional_entropy'],
-            'current_conditional_entropy': state.info['first_current_conditional_entropy'],
-            'applied_torque': state.info['first_applied_torque'],
-            'invariant_physics_state': state.info['first_invariant_physics_state'],
-            'phys_state_history': state.info['first_phys_state_history'],
-            'act_history': state.info['first_act_history'],
-            'steps': jp.zeros_like(state.info['steps']),
-        }
-        current = {
-            'obs': state.obs,
-            'physics_state': state.info['physics_state'],
-            'accumulated_conditional_entropy': state.info['accumulated_conditional_entropy'],
-            'current_conditional_entropy': state.info['current_conditional_entropy'],
-            'applied_torque': state.info['applied_torque'],
-            'invariant_physics_state': state.info['invariant_physics_state'],
-            'phys_state_history': state.info['phys_state_history'],
-            'act_history': state.info['act_history'],
-            'steps': state.info['steps'],
-        }
+        first = {k: state.info[f'first_{k}'] for k in self._carry_keys}
+        first['obs'] = state.info['first_obs']
+        first['steps'] = jp.zeros_like(state.info['steps'])
+        current = {k: state.info[k] for k in self._carry_keys}
+        current['obs'] = state.obs
+        current['steps'] = state.info['steps']
         if self.reset_pipeline_state:
             first['pipeline_state'] = state.info['first_pipeline_state']
             current['pipeline_state'] = state.pipeline_state
         reset = jax.tree.map(where_done, first, current)
 
         info = state.info
-        info['physics_state'] = reset['physics_state']
-        info['accumulated_conditional_entropy'] = reset['accumulated_conditional_entropy']
-        info['current_conditional_entropy'] = reset['current_conditional_entropy']
-        info['applied_torque'] = reset['applied_torque']
-        info['invariant_physics_state'] = reset['invariant_physics_state']
-        info['phys_state_history'] = reset['phys_state_history']
-        info['act_history'] = reset['act_history']
+        for k in self._carry_keys:
+            info[k] = reset[k]
         info['num_inits'] = info['num_inits'] + jp.sum(state.done)
         info['total_done_steps'] = info['total_done_steps'] + jp.sum(
             state.done * state.info['steps']
@@ -296,9 +251,8 @@ class CustomAutoResetWrapper2(Wrapper):
         state = self.env.reset(rng)
         state.info['first_pipeline_state'] = state.pipeline_state
         state.info['first_obs'] = state.obs
-        state.info['first_physics_state'] = state.info['physics_state']
-        state.info['first_applied_torque'] = state.info['applied_torque']
-        state.info['first_invariant_physics_state'] = state.info['invariant_physics_state']
+        for k in self.env.reset_carry_keys:
+            state.info[f'first_{k}'] = state.info[k]
         return state
 
     def step(self, state: State, action: jax.Array) -> State:
@@ -317,19 +271,12 @@ class CustomAutoResetWrapper2(Wrapper):
         )
         obs = jax.tree.map(where_done, state.info['first_obs'], state.obs)
 
-        # Reset info-dict fields in one combined tree.map pass.
-        first_info = {
-            'physics_state':           state.info['first_physics_state'],
-            'applied_torque':          state.info['first_applied_torque'],
-            'invariant_physics_state': state.info['first_invariant_physics_state'],
-            'steps':                   jp.zeros_like(state.info['steps']),
-        }
-        curr_info = {
-            'physics_state':           state.info['physics_state'],
-            'applied_torque':          state.info['applied_torque'],
-            'invariant_physics_state': state.info['invariant_physics_state'],
-            'steps':                   state.info['steps'],
-        }
+        # Reset env-owned info-dict fields (env-declared) + steps in one combined pass.
+        carry_keys = self.env.reset_carry_keys
+        first_info = {k: state.info[f'first_{k}'] for k in carry_keys}
+        first_info['steps'] = jp.zeros_like(state.info['steps'])
+        curr_info = {k: state.info[k] for k in carry_keys}
+        curr_info['steps'] = state.info['steps']
         info = state.info
         info.update(jax.tree.map(where_done, first_info, curr_info))
         return state.replace(pipeline_state=pipeline_state, obs=obs, info=info)
