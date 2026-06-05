@@ -14,8 +14,8 @@ import os
 
 from brax import envs
 from infoprop_jax.algorithms import infoprop
-from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import Wheelbot
-from infoprop_jax.envs.infoprop_env import InfopropEnv as Wheelbot_Infoprop
+from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import WheelbotEnv as Wheelbot
+from infoprop_jax.envs.infoprop_env import InfopropEnv
 from brax.io import model
 import jax
 import jax.numpy as jp
@@ -108,10 +108,9 @@ def main(cfg: omegaconf.DictConfig):
     env = envs.get_environment(env_name, cfg=cfg.env)
     eval_env = envs.get_environment(env_name, cfg=cfg.env, eval_mode=True)
 
-    envs.register_environment('wheelbot_infoprop', Wheelbot_Infoprop)
-    infoprop_env = envs.get_environment(
-        'wheelbot_infoprop',
-        cfg=cfg.env,
+    # The model env is the generic InfopropEnv wrapping a fresh wrappable Wheelbot.
+    infoprop_env = InfopropEnv(
+        envs.get_environment(env_name, cfg=cfg.env),
         min_log_var=cfg.algorithm.min_log_var,
         max_log_var=cfg.algorithm.max_log_var,
         fast_model_rollout=cfg.algorithm.fast_model_rollout,

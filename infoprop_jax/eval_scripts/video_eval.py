@@ -28,8 +28,8 @@ from brax.training.acme import running_statistics
 from brax.training.agents.sac import networks as sac_networks
 from omegaconf import OmegaConf
 
-from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import Wheelbot as RealWheelbot
-from infoprop_jax.envs.infoprop_env import InfopropEnv as ModelWheelbot
+from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import WheelbotEnv as RealWheelbot
+from infoprop_jax.envs.infoprop_env import InfopropEnv
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -261,9 +261,9 @@ def run(eval_cfg):
         t0 = time.time()
         model_ckpt = brax_model.load_params(model_state_path)
 
-        envs.register_environment('_eval_model', ModelWheelbot)
-        env_model = envs.get_environment(
-            '_eval_model', cfg=env_cfg, visualize=True, track_seed=eval_cfg.track_seed,
+        env_model = InfopropEnv(
+            envs.get_environment('_eval_real', cfg=env_cfg, visualize=True,
+                                 track_seed=eval_cfg.track_seed),
             min_log_var=algo_cfg.min_log_var, max_log_var=algo_cfg.max_log_var,
             fast_model_rollout=False)
         jit_step_model  = jax.jit(env_model.step)
