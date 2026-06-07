@@ -24,5 +24,5 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
 python -m infoprop_jax.main \
     algorithm=infoprop \
-    experiment=latest_repo_smoke_test \
-    seed=$RANDOM
+    experiment=new_general_test \
+    seed=0
