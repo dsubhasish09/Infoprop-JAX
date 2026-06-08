@@ -42,6 +42,10 @@ class InfopropEnv(Wrapper):
     self.fast_model_rollout = fast_model_rollout
 
   # ------------------------------------------------------------- fixed core math
+  # The core operates on a SINGLE rollout sample (ensemble axis = 0); ``batched_step``
+  # vmaps it over the rollout. Only the ensemble NN forward pass is kept batched (one
+  # call over all envs) so the network weights are never replicated across the vmapped
+  # axis (which would OOM) — the vmapped per-sample math touches no NN weights.
   def decode_delta(self, raw_mean, raw_logvar, curr_model_state,
                    next_state_delta_mean, next_state_delta_std):
     """Un-normalise the predicted delta and integrate onto the current state.
@@ -56,7 +60,7 @@ class InfopropEnv(Wrapper):
     return member_mean, member_var
 
   def _fuse(self, member_mean, member_var):
-    """Precision-weighted ensemble fusion + Kalman update (single sample, axis 0 = E)."""
+    """Precision-weighted ensemble fusion + Kalman update (single sample, ensemble axis 0)."""
     inv_vars = 1 / (member_var + 1e-12)
     fused_var = 1 / jp.mean(inv_vars, axis=0)
     fused_mean = fused_var * jp.mean(member_mean * inv_vars, axis=0)
@@ -65,54 +69,29 @@ class InfopropEnv(Wrapper):
     conditional_var = (1 - kalman_gain) * fused_var
     return fused_mean, fused_var, kalman_gain, conditional_var, epist_var
 
-  def infoprop_core(self, member_mean, member_var, binning_entropy, rng):
-    """The fixed Infoprop step: fuse, compute conditional entropy, sample next state.
-
-    ``member_mean`` / ``member_var`` are ``[E, full_state_size]`` (single sample).
-    Returns ``(next_full_state, conditional_entropy, diagnostics)``.
-    """
-    fused_mean, fused_var, kalman_gain, conditional_var, epist_var = self._fuse(
-        member_mean, member_var)
-    conditional_entropy = jp.clip(
-        0.5 * jp.log2(2 * jp.pi * jp.e * conditional_var) - binning_entropy, 0, None)
-    next_full = fused_mean + jax.random.normal(
-        rng, shape=(fused_mean.shape[0],)) * jp.sqrt(fused_var)
-    diagnostics = {
-        'kalman_gain': kalman_gain,
-        'conditional_var': conditional_var,
-        'fused_var': fused_var,
-        'fused_mean': fused_mean,
-        'epist_var': epist_var,
-    }
-    return next_full, conditional_entropy, diagnostics
-
   def _predict_member(self, raw_mean, raw_logvar, curr_model_state, curr_context,
                       next_state_delta_mean, next_state_delta_std):
-    """decode + env augment for a single sample -> per-member full ``(mean, var)``."""
+    """decode + env augment for a single sample -> per-member full ``(mean, var)`` ``[E, full]``."""
     member_mean, member_var = self.decode_delta(
         raw_mean, raw_logvar, curr_model_state, next_state_delta_mean, next_state_delta_std)
     return self.env.augment_prediction(member_mean, member_var, curr_model_state, curr_context)
 
-  # ----------------------------------------------------------- model-step entries
-  def _single_step(self, state, action, model_params, obs_mean, obs_std,
+  def _finish_step(self, state, raw_mean, raw_logvar, curr_model_state, curr_context,
+                   applied_action, processed_action,
                    next_state_delta_mean, next_state_delta_std,
                    per_step_cutoff, accumulated_cutoff, binning_entropy):
-    """One full learned-dynamics step for a single rollout sample.
-
-    preprocess (env) -> NN -> decode -> augment (env) -> fuse / entropy / sample ->
-    framework finalize (rng + entropy accumulation) -> postprocess (env) ->
-    entropy-based termination. ``batched_step`` vmaps this over the rollout batch.
-    """
-    nn_input, curr_model_state, curr_context, applied_action, processed_action = (
-        self.env.preprocess(state, action))
+    """Per-sample model step given the ensemble output: decode -> augment (env) -> fuse
+    -> entropy -> aleatoric sample -> framework finalise (rng + entropy) -> postprocess
+    (env) -> entropy-based termination. ``batched_step`` vmaps this over the rollout."""
     curr_rng, rng = jax.random.split(state.info['rng'])
-    raw_mean, raw_logvar = self._model_apply_fn(
-        {"params": model_params}, nn_input, applied_action, obs_mean, obs_std)
     member_mean, member_var = self._predict_member(
         raw_mean, raw_logvar, curr_model_state, curr_context,
         next_state_delta_mean, next_state_delta_std)
-    next_full, conditional_entropy, _ = self.infoprop_core(
-        member_mean, member_var, binning_entropy, curr_rng)
+    fused_mean, fused_var, _, conditional_var, _ = self._fuse(member_mean, member_var)
+    conditional_entropy = jp.clip(
+        0.5 * jp.log2(2 * jp.pi * jp.e * conditional_var) - binning_entropy, 0, None)
+    next_full = fused_mean + jp.sqrt(fused_var) * jax.random.normal(
+        curr_rng, shape=(self.full_state_size,))
     next_model_state = next_full[:self.model_state_size]
     next_context = next_full[self.model_state_size:]
 
@@ -138,15 +117,23 @@ class InfopropEnv(Wrapper):
     done = jp.where(violation, 1.0, state.done)
     return state.replace(done=done, info=info)
 
+  # ----------------------------------------------------------- model-step entries
   def batched_step(self, state, action, model_params, obs_mean, obs_std,
                    next_state_delta_mean, next_state_delta_std,
                    per_step_cutoff, accumulated_cutoff, binning_entropy):
-    """Vectorise ``_single_step`` over a batch of rollouts. The shared model params,
-    normalisation stats and cutoffs are broadcast (in_axes=None), not mapped."""
+    """One Infoprop step over a batch of rollouts. The ensemble NN forward pass runs
+    once over the whole batch (its weights are not replicated across the vmapped axis);
+    the per-sample decode/augment/fuse/sample/postprocess is vmapped via ``_finish_step``.
+    """
+    nn_input, curr_model_state, curr_context, applied_action, processed_action = (
+        jax.vmap(self.env.preprocess)(state, action))
+    raw_mean, raw_logvar = self._model_apply_fn(
+        {"params": model_params}, nn_input, applied_action, obs_mean, obs_std)
     return jax.vmap(
-        self._single_step,
-        in_axes=(0, 0, None, None, None, None, None, None, None, None))(
-        state, action, model_params, obs_mean, obs_std,
+        self._finish_step,
+        in_axes=(0, 0, 0, 0, 0, 0, 0, None, None, None, None, None))(
+        state, raw_mean, raw_logvar, curr_model_state, curr_context,
+        applied_action, processed_action,
         next_state_delta_mean, next_state_delta_std,
         per_step_cutoff, accumulated_cutoff, binning_entropy)
 
@@ -170,14 +157,19 @@ class InfopropEnv(Wrapper):
     """Advance one step using the learned model (single, un-batched; eval path).
 
     The ensemble params, normalisation stats and cutoffs are read from `info`
-    (injected via ``put_in_NN_params_and_rng``). The batched training path goes
-    through ``batched_step`` instead.
+    (injected via ``put_in_NN_params_and_rng``).
     """
-    return self._single_step(
-        state, action, state.info['model'], state.info['model_obs_mean'],
-        state.info['model_obs_std'], state.info['next_state_delta_mean'],
-        state.info['next_state_delta_std'], state.info['per_step_cutoff'],
-        state.info['accumulated_cutoff'], state.info['binning_entropy'])
+    nn_input, curr_model_state, curr_context, applied_action, processed_action = (
+        self.env.preprocess(state, action))
+    raw_mean, raw_logvar = self._model_apply_fn(
+        {"params": state.info['model']}, nn_input, applied_action,
+        state.info['model_obs_mean'], state.info['model_obs_std'])
+    return self._finish_step(
+        state, raw_mean, raw_logvar, curr_model_state, curr_context,
+        applied_action, processed_action,
+        state.info['next_state_delta_mean'], state.info['next_state_delta_std'],
+        state.info['per_step_cutoff'], state.info['accumulated_cutoff'],
+        state.info['binning_entropy'])
 
   # ------------------------------------------------------------------- trainer wiring
   def put_in_NN_params_and_rng(self, model, model_obs_mean, model_obs_std,

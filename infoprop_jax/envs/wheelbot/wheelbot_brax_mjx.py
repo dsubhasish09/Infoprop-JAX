@@ -300,9 +300,14 @@ class WheelbotEnv(InfopropWrappable):
         self.crash_penalty = cfg.get('crash_penalty', -1000)
         self.rew_scale = cfg.get('rew_scale', 1e-3)
         self.eval_mode = eval_mode
-        # Randomize env parameters.
+        # Randomize env parameters (real-env data-collection reset).
         self.init_xy_std = cfg.get('init_xy_std', track_width / 16)
         self.init_angle_std = cfg.get('init_angle_std', jp.pi / 16)
+        # Wider spread used when re-seeding model rollouts from the replay buffer
+        # (reset_with_init_robot_state). Kept separate from the data-collection spread
+        # above so model rollouts branch from a diverse initial-state distribution.
+        self.resample_init_xy_std = cfg.get('resample_init_xy_std', track_width / 3)
+        self.resample_init_angle_std = cfg.get('resample_init_angle_std', jp.pi / 3)
         # History parameters for model learning.
         self.obs_history = cfg.get('obs_history', 1)
         self.act_history = cfg.get('act_history', 0)
@@ -733,7 +738,9 @@ class WheelbotEnv(InfopropWrappable):
 
     def augment_prediction(self, member_mean, member_var, curr_model_state, curr_context):
         """Append the 5 integrated odometry dims (yaw, drive/balance angle, x, y) and
-        propagate their variance. Single rollout sample: ``[E, model_state_size]`` in."""
+        propagate their variance. Single rollout sample: ``member_mean``/``member_var``
+        are ``[E, model_state_size]``, ``curr_model_state`` ``[model_state_size]``,
+        ``curr_context`` ``[context_size]``; returns ``[E, full_state_size]``."""
         dt = self.dt
         means_, vars_ = member_mean, member_var
         curr_physics_state, curr_odom_state = curr_model_state, curr_context
@@ -830,11 +837,11 @@ class WheelbotEnv(InfopropWrappable):
         rng, pos_key = jax.random.split(rng)
         init_xy, init_angle = trajectory.get_rand_init_pos(pos_key)
         rng, xy_key = jax.random.split(rng)
-        d = jp.clip(jax.random.normal(xy_key, shape=()) * self.init_xy_std, -track_width / 2, track_width / 2)
+        d = jp.clip(jax.random.normal(xy_key, shape=()) * self.resample_init_xy_std, -track_width / 2, track_width / 2)
         perp_dir = jp.array([-jp.sin(init_angle), jp.cos(init_angle)])
         init_xy = init_xy + d * perp_dir
         rng, angle_key = jax.random.split(rng)
-        offset_angle = jp.clip(jax.random.normal(angle_key, shape=init_angle.shape) * self.init_angle_std, -jp.pi, jp.pi)
+        offset_angle = jp.clip(jax.random.normal(angle_key, shape=init_angle.shape) * self.resample_init_angle_std, -jp.pi, jp.pi)
         init_angle = init_angle + offset_angle
 
         ms = self.model_state_size

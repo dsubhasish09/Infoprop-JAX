@@ -96,8 +96,9 @@ class InfopropWrappable(PipelineEnv):
 
     Default identity: the NN predicts the entire next state (``context_size == 0``).
     Override to append integrated/derived dims and propagate their variance (must
-    happen *before* fusion). Operates on a single rollout sample:
-    ``member_mean``/``member_var`` are ``[E, model_state_size]``.
+    happen *before* fusion). Operates on a single rollout sample (the framework vmaps
+    it over the batch): ``member_mean``/``member_var`` are ``[E, model_state_size]``,
+    ``curr_model_state`` ``[model_state_size]``, ``curr_context`` ``[context_size]``.
     """
     return member_mean, member_var
 
