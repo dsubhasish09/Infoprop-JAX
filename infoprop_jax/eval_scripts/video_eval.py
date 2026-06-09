@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Devdutt Subhasish
+# SPDX-License-Identifier: MIT
 """Video evaluation for InfoProp Dyna checkpoints.
 
 Can be invoked in two ways:
