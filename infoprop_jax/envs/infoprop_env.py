@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Devdutt Subhasish
+# SPDX-License-Identifier: MIT
 """
 InfopropEnv: model-based environment for InfoProp Dyna rollouts.
 
