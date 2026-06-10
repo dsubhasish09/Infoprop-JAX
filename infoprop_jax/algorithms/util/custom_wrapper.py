@@ -1,5 +1,19 @@
 """
-Brax environment wrappers for episode bookkeeping and observation normalisation.
+Infoprop training wrappers (Brax `Wrapper` subclasses).
+
+The model-rollout stack wraps an ``InfopropEnv`` (built via ``wrap_custom``):
+
+    CustomAutoResetWrapper -> CustomEpisodeWrapper -> VmapInfopropWrapper -> InfopropEnv -> <env>
+
+  * ``VmapInfopropWrapper``  - resets a batch of rollouts from the physics replay buffer and runs
+    the batched Infoprop step (``InfopropEnv.batched_step``), popping the shared (non-per-env) info
+    so it is not vmapped.
+  * ``CustomEpisodeWrapper`` - episode step counting, truncation (incl. entropy-cutoff truncation),
+    and per-episode metric aggregation.
+  * ``CustomAutoResetWrapper`` - reverts env-owned + entropy state to its episode-start values on
+    ``done`` (driven by the env's ``reset_carry_keys``), and tracks rollout-length counters.
+
+The real env is wrapped with ``wrap`` (standard Vmap/Episode + ``CustomAutoResetWrapper2``).
 """
 from typing import Callable, Dict, Optional, Tuple
 
@@ -23,7 +37,6 @@ def wrap_custom(
     replay_buffer,
     episode_length: int = 1000,
     action_repeat: int = 1,
-    reset_pipeline_state: bool = True,
     randomization_fn: Optional[
         Callable[[System], Tuple[System, System]]
     ] = None,
@@ -31,7 +44,7 @@ def wrap_custom(
     """Apply episode-tracking wrapper to the environment."""
     env = VmapInfopropWrapper(env, replay_buffer)
     env = CustomEpisodeWrapper(env, episode_length, action_repeat)
-    env = CustomAutoResetWrapper(env, reset_pipeline_state=reset_pipeline_state)
+    env = CustomAutoResetWrapper(env)
     return env
 
 
@@ -67,7 +80,13 @@ def wrap(
 
 
 class VmapInfopropWrapper(Wrapper):
-    """Vectorizes Brax env."""
+    """Batches Infoprop model rollouts.
+
+    ``reset`` samples a batch of real-data physics transitions from the replay buffer and turns each
+    into an imagined-rollout initial state via the env's ``reset_from_buffer``. ``step`` runs the
+    batched Infoprop step, popping the shared (non-per-env) info entries — ensemble params,
+    normalisation stats, cutoffs, and the auto-reset counters — so they are broadcast, not vmapped.
+    """
 
     def __init__(self, env: Env, replay_buffer, batch_size: Optional[int] = None):
         super().__init__(env)
@@ -81,10 +100,10 @@ class VmapInfopropWrapper(Wrapper):
         physics_buffer_state, init_transition = self.replay_buffer.get_model_dataset(
             rng[0], physics_buffer_state, max_samples=n_envs
         )
-        # The env owns how a sampled physics transition becomes an initial state.
-        build_pipeline_state = not self.env.fast_model_rollout
-        init_state = jax.vmap(self.env.reset_from_buffer, in_axes=(0, 0, None))(
-            rng, init_transition, build_pipeline_state)
+        # The env owns how a sampled physics transition becomes an initial state,
+        # including whether it builds a pipeline_state. We stay agnostic to that.
+        init_state = jax.vmap(self.env.reset_from_buffer, in_axes=(0, 0))(
+            rng, init_transition)
         info = init_state.info
         info['info_cutoff'] = jp.zeros(n_envs)
         init_state = init_state.replace(info=info)
@@ -189,9 +208,8 @@ class CustomEpisodeWrapper(Wrapper):
 class CustomAutoResetWrapper(Wrapper):
     """Automatically resets Brax envs that are done."""
 
-    def __init__(self, env: Env, reset_pipeline_state: bool = True):
+    def __init__(self, env: Env):
         super().__init__(env)
-        self.reset_pipeline_state = reset_pipeline_state
         # Env-owned dynamic info keys (env-declared) plus the framework-owned entropy
         # accumulators are reverted to their episode-start values on `done`.
         self._carry_keys = list(env.reset_carry_keys) + [
@@ -199,7 +217,10 @@ class CustomAutoResetWrapper(Wrapper):
 
     def reset(self, rng: jax.Array, physics_buffer_state) -> State:
         state = self.env.reset(rng, physics_buffer_state)
-        if self.reset_pipeline_state:
+        # Agnostic to fast rollouts: snapshot pipeline_state only if the env built
+        # one (it is None in fast-rollout mode). ``None`` is a static pytree node,
+        # so this check is valid under jit/scan.
+        if state.pipeline_state is not None:
             state.info['first_pipeline_state'] = state.pipeline_state
         state.info['first_obs'] = state.obs
         for k in self._carry_keys:
@@ -227,7 +248,8 @@ class CustomAutoResetWrapper(Wrapper):
         current = {k: state.info[k] for k in self._carry_keys}
         current['obs'] = state.obs
         current['steps'] = state.info['steps']
-        if self.reset_pipeline_state:
+        has_pipeline_state = state.pipeline_state is not None
+        if has_pipeline_state:
             first['pipeline_state'] = state.info['first_pipeline_state']
             current['pipeline_state'] = state.pipeline_state
         reset = jax.tree.map(where_done, first, current)
@@ -240,7 +262,7 @@ class CustomAutoResetWrapper(Wrapper):
             state.done * state.info['steps']
         )
         info['steps'] = reset['steps']
-        pipeline_state = reset['pipeline_state'] if self.reset_pipeline_state else state.pipeline_state
+        pipeline_state = reset['pipeline_state'] if has_pipeline_state else state.pipeline_state
         return state.replace(pipeline_state=pipeline_state, obs=reset['obs'], info=info)
 
 
@@ -249,7 +271,9 @@ class CustomAutoResetWrapper2(Wrapper):
 
     def reset(self, rng: jax.Array) -> State:
         state = self.env.reset(rng)
-        state.info['first_pipeline_state'] = state.pipeline_state
+        # Snapshot pipeline_state only if the env built one (agnostic to fast rollouts).
+        if state.pipeline_state is not None:
+            state.info['first_pipeline_state'] = state.pipeline_state
         state.info['first_obs'] = state.obs
         for k in self.env.reset_carry_keys:
             state.info[f'first_{k}'] = state.info[k]
@@ -265,10 +289,14 @@ class CustomAutoResetWrapper2(Wrapper):
                 done = jp.reshape(done, [x.shape[0]] + [1] * (len(x.shape) - 1))  # type: ignore
             return jp.where(done, x, y)
 
-        # Reset pipeline_state and obs (separate pytree structures).
-        pipeline_state = jax.tree.map(
-            where_done, state.info['first_pipeline_state'], state.pipeline_state
-        )
+        # Reset pipeline_state and obs (separate pytree structures). pipeline_state
+        # is reverted only if the env built one (it is None in fast-rollout mode).
+        if state.pipeline_state is not None:
+            pipeline_state = jax.tree.map(
+                where_done, state.info['first_pipeline_state'], state.pipeline_state
+            )
+        else:
+            pipeline_state = state.pipeline_state
         obs = jax.tree.map(where_done, state.info['first_obs'], state.obs)
 
         # Reset env-owned info-dict fields (env-declared) + steps in one combined pass.

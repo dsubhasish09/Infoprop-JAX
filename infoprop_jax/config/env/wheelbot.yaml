@@ -25,3 +25,6 @@ sin_cos_encoding: False
 #   drive_angle_rate, balance_angle_rate, body_vx, body_vy, body_vz, z]
 meas_noise_std: [2e-3, 2e-3, 2e-1, 2e-1, 2e-1, 2e-1, 2e-1, 2e-2, 2e-2, 2e-2, 1.2e-4]
 process_noise_std: [1e-3, 1e-3, 1e-1, 1e-1, 1e-1, 1e-1, 1e-1, 1e-2, 1e-2, 1e-2, 6e-5]
+
+# Skip building the MJX pipeline_state during model rollouts (env-side optimisation).
+fast_model_rollout: true

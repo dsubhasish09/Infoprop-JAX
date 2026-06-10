@@ -207,8 +207,10 @@ def run(eval_cfg):
         action_size=action_size,
         preprocess_observations_fn=normalize_fn,
         hidden_layer_sizes=tuple(algo_cfg.agent_hidden_layer_sizes),
-        policy_network_layer_norm=algo_cfg.agent_layer_norm,
-        q_network_layer_norm=algo_cfg.agent_layer_norm,
+        policy_network_layer_norm=algo_cfg.get(
+            'policy_network_layer_norm', algo_cfg.agent_layer_norm),
+        q_network_layer_norm=algo_cfg.get(
+            'q_network_layer_norm', algo_cfg.agent_layer_norm),
     )
     make_policy = sac_networks.make_inference_fn(sac_net)
     params = (normalizer_params, policy_params)
