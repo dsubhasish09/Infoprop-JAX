@@ -1,5 +1,5 @@
 """
-Hydra entry point for Infoprop Dyna training on the Mini Wheelbot.
+Hydra entry point for Infoprop Dyna training.
 
 Reads configuration from infoprop_jax/config/, sets up Weights & Biases
 logging, defines domain randomisation, registers Brax environments, and calls
@@ -14,7 +14,9 @@ import os
 
 from brax import envs
 from infoprop_jax.algorithms import infoprop
-from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import WheelbotEnv as Wheelbot
+# Importing the envs package registers all bundled environments with Brax's
+# global registry, so they resolve via ``envs.get_environment(<name>)`` below.
+import infoprop_jax.envs  # noqa: F401  (import for registration side effect)
 from infoprop_jax.envs.infoprop_env import InfopropEnv
 from brax.io import model
 import jax
@@ -102,18 +104,17 @@ def main(cfg: omegaconf.DictConfig):
             }
             wandb.log(data)
 
-    envs.register_environment('wheelbot', Wheelbot)
     # instantiate the environment
-    env_name = 'wheelbot'
+    env_name = cfg.env.get('env_name', str(cfg.env.name).lower())
     env = envs.get_environment(env_name, cfg=cfg.env)
     eval_env = envs.get_environment(env_name, cfg=cfg.env, eval_mode=True)
 
-    # The model env is the generic InfopropEnv wrapping a fresh wrappable Wheelbot.
+    # The model env is the generic InfopropEnv wrapping a fresh wrappable env.
+    # Whether that env uses fast rollouts is its own concern (read from cfg.env).
     infoprop_env = InfopropEnv(
         envs.get_environment(env_name, cfg=cfg.env),
         min_log_var=cfg.algorithm.min_log_var,
         max_log_var=cfg.algorithm.max_log_var,
-        fast_model_rollout=cfg.algorithm.fast_model_rollout,
     )
 
     # training function
@@ -130,6 +131,10 @@ def main(cfg: omegaconf.DictConfig):
         agent_batch_size=train_cfg.agent_batch_size,
         agent_hidden_layer_sizes=train_cfg.agent_hidden_layer_sizes,
         agent_layer_norm=train_cfg.agent_layer_norm,
+        policy_network_layer_norm=train_cfg.get(
+            'policy_network_layer_norm', train_cfg.agent_layer_norm),
+        q_network_layer_norm=train_cfg.get(
+            'q_network_layer_norm', train_cfg.agent_layer_norm),
         grad_updates_per_model_step=train_cfg.grad_updates_per_model_step,
         num_resampling_epochs=train_cfg.num_resampling_epochs,
         num_training_steps_per_model_train=train_cfg.num_training_steps_per_model_train,
@@ -140,8 +145,6 @@ def main(cfg: omegaconf.DictConfig):
         model_layer_norm=train_cfg.model_layer_norm,
         patience=train_cfg.patience,
         target_entropy=train_cfg.target_entropy,
-        min_log_var=train_cfg.min_log_var,
-        max_log_var=train_cfg.max_log_var,
         num_envs=train_cfg.num_model_envs,
         max_rollout_length=train_cfg.max_rollout_length,
         lower_quantile=train_cfg.lower_quantile,
@@ -160,12 +163,9 @@ def main(cfg: omegaconf.DictConfig):
         reset_agent_per_trial=train_cfg.reset_agent_per_trial,
         reset_model_replay_buffer=train_cfg.reset_model_replay_buffer,
         reset_model_per_trial=train_cfg.reset_model_per_trial,
-        fast_model_rollout=train_cfg.fast_model_rollout,
-        checkpoint_logdir=output_dir,
         agent_dir=os.path.join(output_dir, 'policy'),
         model_dir=os.path.join(output_dir, 'model'),
         seed=cfg.seed,
-        env_cfg=cfg.env,
     )
 
     times = [datetime.now()]

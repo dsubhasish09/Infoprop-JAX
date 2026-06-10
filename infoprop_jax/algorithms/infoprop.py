@@ -41,8 +41,6 @@ from infoprop_jax.algorithms.util.custom_evaluator import CustomEvaluator
 from infoprop_jax.algorithms.util.custom_wrapper import wrap_custom, wrap
 from infoprop_jax.algorithms.util.model_learning.model_dataset import ReplayBufferPhysicsState
 from infoprop_jax.algorithms.util.model_learning.model_trainer import compute_loss
-from infoprop_jax.envs.infoprop_env import InfopropEnv as Model_Wheelbot
-from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import WheelbotEnv as Real_Wheelbot
 
 State = envs.State
 Env = envs.Env
@@ -50,10 +48,6 @@ Metrics = types.Metrics
 Transition = types.Transition
 
 ReplayBufferState = Any
-
-# Physics-state column indices shared by get_cutoffs and the model environments
-_EULER_RATE_IDX = jnp.array([2, 5, 6])   # roll_dot, pitch_dot, yaw_dot
-_BODY_VEL_IDX   = jnp.array([7, 8, 9])  # body vx, vy, vz
 
 @flax.struct.dataclass
 class TrainingState:
@@ -80,36 +74,6 @@ class TrainingState:
   next_state_delta_mean: jnp.ndarray 
   next_state_delta_std: jnp.ndarray
 
-def Rx(theta):
-    """
-    Rotation matrix around x-axis.
-    """
-    return jnp.array([[1, 0, 0],
-                      [0, jnp.cos(theta), -jnp.sin(theta)],
-                      [0, jnp.sin(theta), jnp.cos(theta)]])
-
-def Ry(theta):
-    """
-    Rotation matrix around y-axis.
-    """
-    return jnp.array([[jnp.cos(theta), 0, jnp.sin(theta)],
-                      [0, 1, 0],
-                      [-jnp.sin(theta), 0, jnp.cos(theta)]])
-
-def Rz(theta):
-    """
-    Rotation matrix around z-axis.
-    """
-    return jnp.array([[jnp.cos(theta), -jnp.sin(theta), 0],
-                      [jnp.sin(theta), jnp.cos(theta), 0],
-                      [0, 0, 1]])
-
-def YRP(yaw, roll, pitch):
-   """ 
-   Combined rotation matrix for yaw, roll, and pitch.
-   """
-   return Rz(yaw) @ Rx(roll) @ Ry(pitch)
-
 def _unpmap(v):
     """No-op: retained for structural symmetry; there is no device axis to strip."""
     return v
@@ -132,7 +96,6 @@ def tree_repeat(v, n):
 def _init_training_state(
     key: PRNGKey,
     obs_size: int,
-    local_devices_to_use: int,
     sac_network: sac_networks.SACNetworks,
     alpha_optimizer: optax.GradientTransformation,
     policy_optimizer: optax.GradientTransformation,
@@ -198,7 +161,6 @@ def train(
     agent_batch_size: int = 256,
     num_trials: int = 1,
     normalize_observations: bool = False,
-    max_devices_per_host: Optional[int] = None,
     reward_scaling: float = 1.0,
     tau: float = 0.005,
     min_physics_replay_size: int = 0,
@@ -211,20 +173,19 @@ def train(
     network_factory: types.NetworkFactory[
         sac_networks.SACNetworks
     ] = sac_networks.make_sac_networks,
-    checkpoint_logdir: Optional[str] = None,
     agent_dir: Optional[str] = None,
     model_dir: Optional[str] = None,
     agent_hidden_layer_sizes: Tuple[int] = (256, 256),
     model_hidden_layer_sizes: Tuple[int] = (256, 256),
     target_entropy: Optional[float] = None,
-    min_log_var: float = -4,
-    max_log_var: float = -2,
     max_rollout_length: int = 1000,
     lower_quantile: float = 0.01,
     upper_quantile: float = 0.95,
     patience: int = 10,
     model_layer_norm: bool = True,
     agent_layer_norm: bool = True,
+    policy_network_layer_norm: Optional[bool] = None,
+    q_network_layer_norm: Optional[bool] = None,
     eval_environment = None,
     progress_fn = None,
     randomization_fn: Optional[
@@ -232,13 +193,11 @@ def train(
     ] = None,
     obs_history: int = 1,
     act_history: int = 0,
-    env_cfg = None,
     tune_entropy: bool = True,
     alpha: float = 0.1,
     reset_agent_per_trial: bool = False,
     reset_model_replay_buffer: bool = False,
     reset_model_per_trial: bool = False,
-    fast_model_rollout: bool = True,
 ):
   """Main Infoprop Dyna training loop.
 
@@ -292,26 +251,29 @@ def train(
     else:
       wrap_for_training = wrap
 
-    v_randomization_fn = None
-    if randomization_fn is not None:
-      v_randomization_fn = functools.partial(
+    # Build a per-env randomization fn: the domain-randomization wrapper produces
+    # one System per parallel env, so the split count must match the batch size
+    # each env is actually reset/stepped with (num_real_envs for the real env,
+    # num_real_eval_envs for eval) — not the model env count (num_envs).
+    def make_v_randomization_fn(num_parallel_envs):
+      if randomization_fn is None:
+        return None
+      return functools.partial(
           randomization_fn,
-          rng=jax.random.split(
-              key, num_envs
-          ),
+          rng=jax.random.split(key, num_parallel_envs),
       )
 
     env = wrap_for_training(
         env,
         episode_length=episode_length,
         action_repeat=action_repeat,
-        randomization_fn=v_randomization_fn,
+        randomization_fn=make_v_randomization_fn(num_real_envs),
     )  # pytype: disable=wrong-keyword-args
     eval_env = envs.training.wrap(
         eval_environment,
         episode_length=episode_length,
         action_repeat=action_repeat,
-        randomization_fn=v_randomization_fn,
+        randomization_fn=make_v_randomization_fn(num_real_eval_envs),
     )
 
   # Initializing agent
@@ -328,9 +290,16 @@ def train(
       action_size=action_size,
       preprocess_observations_fn=normalize_fn,
       hidden_layer_sizes = agent_hidden_layer_sizes,
-      # TODO Need to put these in config
-      policy_network_layer_norm=agent_layer_norm,
-        q_network_layer_norm=agent_layer_norm,
+      policy_network_layer_norm=(
+          agent_layer_norm
+          if policy_network_layer_norm is None
+          else policy_network_layer_norm
+      ),
+      q_network_layer_norm=(
+          agent_layer_norm
+          if q_network_layer_norm is None
+          else q_network_layer_norm
+      ),
   )
   make_policy = sac_networks.make_inference_fn(sac_network)
 
@@ -374,7 +343,7 @@ def train(
       reward=0.0,
       discount=0.0,
       next_observation=dummy_obs,
-      extras={'state_extras': {'truncation': 0.0, 'track_seed': 0,'invariant_physics_state':jnp.zeros((context_size,))}, 'policy_extras': {}},
+      extras={'state_extras': {'truncation': 0.0}, 'policy_extras': {}},
   )
   # model replay buffer
   model_replay_buffer =  replay_buffers.UniformSamplingQueue(
@@ -391,9 +360,10 @@ def train(
 
 
   # physics replay buffer — schema (and its context state_extras) provided by the
-  # real env so the loop carries no env-specific field names.
+  # real env so the loop carries no env-specific field names. The model-training
+  # transitions are built by env.extract_physics_transition; the SAC transitions only
+  # carry the generic 'truncation' flag.
   dummy_transition = environment.dummy_physics_transition
-  physics_extra_fields = tuple(dummy_transition.extras['state_extras'].keys())
   replay_buffer_physics_state = ReplayBufferPhysicsState(
       max_replay_size=max_physics_replay_size // device_count,
       dummy_data_sample=dummy_transition,
@@ -646,18 +616,21 @@ def train(
 
     model_dataset_val = full_transitions
 
-    curr_physics_state = model_dataset_val.observation[:, (obs_history -1) * model_state_size : obs_history * model_state_size]
-    curr_odom_state = jnp.zeros((curr_physics_state.shape[0], context_size))
-    applied_torque = model_dataset_val.action
+    # Current model state for each stored transition = the most recent model-state in
+    # the observation history; env-specific context comes from the replay-buffer
+    # extras through the wrappable env contract.
+    curr_model_state = model_dataset_val.observation[:, (obs_history - 1) * model_state_size : obs_history * model_state_size]
+    curr_context = jax.vmap(model_environment.context_from_transition)(model_dataset_val)
+    action = model_dataset_val.action
     # Forward pass through the ensemble: each of the E members predicts (mean, logvar)
     means_, logvars_ = model_.apply_fn(
-            {"params": model_.params}, model_dataset_val.observation, applied_torque, model_obs_mean, model_obs_std
+            {"params": model_.params}, model_dataset_val.observation, action, model_obs_mean, model_obs_std
         )
     # Decode + augment + fuse + per-step differential entropy. Delegated to the env so the
     # uncertainty-propagation math lives in one place (env.augment_prediction), shared with
     # the rollout step rather than duplicated here.
     diff_entropy = model_environment.batched_diff_entropy(
-        means_, logvars_, curr_physics_state, curr_odom_state,
+        means_, logvars_, curr_model_state, curr_context,
         next_state_delta_mean, next_state_delta_std)
     binning_entropy = jnp.quantile(diff_entropy, lower_quantile, axis=0) - 1
     conditional_entropy = jnp.clip(diff_entropy - binning_entropy, 0, None)
@@ -750,7 +723,7 @@ def train(
     policy = make_policy((normalizer_params, policy_params))
     # curr_state = jnp.concatenate([*env_state.pipeline_state.qpos, *env_state.pipeline_state.qvel], axis=-1)
     env_state, transitions, transitions_state = actor_step(
-        env, env_state, policy, key, extra_fields=physics_extra_fields
+        env, env_state, policy, key, extra_fields=('truncation',)
     )
 
     normalizer_params = running_statistics.update(
@@ -778,7 +751,7 @@ def train(
     policy = make_policy((normalizer_params, policy_params))
     # curr_state = jnp.concatenate([*env_state.pipeline_state.qpos, *env_state.pipeline_state.qvel], axis=-1)
     env_state, transitions, transitions_state = random_actor_step(
-        env, env_state, policy, key, extra_fields=physics_extra_fields
+        env, env_state, policy, key, extra_fields=('truncation',)
     )
 
     normalizer_params = running_statistics.update(
@@ -877,7 +850,7 @@ def train(
     # nonlocal model_env 
     policy = make_policy((normalizer_params, policy_params))
     model_env_state, model_transitions = model_actor_step(
-        model_env, model_env_state, policy, key, extra_fields=('truncation','track_seed')
+        model_env, model_env_state, policy, key, extra_fields=('truncation',)
     )
 
     normalizer_params = running_statistics.update(
@@ -1219,7 +1192,6 @@ def train(
   training_state = _init_training_state(
       key=global_key,
       obs_size=obs_size,
-      local_devices_to_use=local_devices_to_use,
       sac_network=sac_network,
       alpha_optimizer=alpha_optimizer,
       policy_optimizer=policy_optimizer,
@@ -1268,8 +1240,7 @@ def train(
             replay_buffer_physics_state,
             episode_length=episode_length,
             action_repeat=action_repeat,
-            reset_pipeline_state=not fast_model_rollout,
-  ) 
+  )
   model_env_reset = jax.jit(jax.vmap(model_env.reset, in_axes=(0, None)))
 
   # Hoisted outside the trial loop so JAX jit cache hits every iteration.
@@ -1306,9 +1277,11 @@ def train(
         # full_transitions — fixed shape, always valid data, compiles once
         full_transitions = _unflatten(data[valid_perm, :])
 
-        # train_data — fixed shape [fixed_train_size, raw_dim], compiles once
+        # train_data — fixed shape [fixed_train_size, raw_dim], compiles once.
+        # Each of the n_ensemble members gets an independent shuffle of the training set.
+        n_ensemble = model_trainer.n_ensemble
         train_data = data[train_perm, :]
-        local_key, *shuffle_keys = jax.random.split(local_key, 9)
+        local_key, *shuffle_keys = jax.random.split(local_key, n_ensemble + 1)
         shuffle_keys = jnp.stack(shuffle_keys, axis=0)
         shuffle_idx = jax.vmap(lambda k: jax.random.permutation(k, fixed_train_size))(shuffle_keys)
         train_data = train_data[shuffle_idx, :]
@@ -1317,10 +1290,10 @@ def train(
         val_data = data[val_perm, :]
 
         def _reshape_train(x):
-            # x: (8, fixed_train_size, leaf_dim) from _unflatten_vmap
-            swapped = x.swapaxes(0, 1)  # (fixed_train_size, 8, leaf_dim)
+            # x: (n_ensemble, fixed_train_size, leaf_dim) from _unflatten_vmap
+            swapped = x.swapaxes(0, 1)  # (fixed_train_size, n_ensemble, leaf_dim)
             return jnp.reshape(swapped, (num_updates_in_epoch, -1) + swapped.shape[1:])
-            # result: (num_updates_in_epoch, model_batch_size, 8, leaf_dim)
+            # result: (num_updates_in_epoch, model_batch_size, n_ensemble, leaf_dim)
         train_transitions = jax.tree_util.tree_map(_reshape_train, _unflatten_vmap(train_data))
 
         val_transitions = _unflatten(val_data)

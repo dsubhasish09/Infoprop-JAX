@@ -1,12 +1,13 @@
 """
-Ground-truth Wheelbot environment using MuJoCo/MJX physics.
+Wheelbot environment using MuJoCo/MJX physics — the example `InfopropWrappable`.
 
-This is the real-world proxy environment used for:
-  - Collecting training data for the dynamics model.
-  - Final policy evaluation after training.
+`WheelbotEnv` plays two roles with one observation/reward/state layout:
+  - the ground-truth env (its real `step`) for collecting training data and final evaluation, and
+  - the env wrapped by `InfopropEnv` for imagined model rollouts, via the Infoprop hooks
+    (`preprocess` / `augment_prediction` / `postprocess` / `reset_from_buffer`).
 
-During model-based training (InfoProp Dyna), this environment is replaced by
-infoprop_env.py which uses the learned ensemble model instead.
+See infoprop_jax/envs/README.md for the contract and infoprop_jax/envs/wheelbot/README.md for the
+Wheelbot state/observation/reward details.
 
 Robot dynamics summary:
   - 2-wheeled differential robot with a reaction wheel for pitch balance.
@@ -311,6 +312,9 @@ class WheelbotEnv(InfopropWrappable):
         # History parameters for model learning.
         self.obs_history = cfg.get('obs_history', 1)
         self.act_history = cfg.get('act_history', 0)
+        # Env-owned fast-rollout flag: skip building the MJX pipeline_state during
+        # model rollouts. The framework is agnostic to this; see InfopropWrappable.
+        self.fast_model_rollout = cfg.get('fast_model_rollout', True)
         self.lookahead = cfg.get('lookahead', 10)
         self.sin_cos_encoding = cfg.get('sin_cos_encoding', False)
         meas_std = cfg.get('meas_noise_std', None)
@@ -359,6 +363,10 @@ class WheelbotEnv(InfopropWrappable):
             next_observation=next_state.info['physics_state'],
             extras={'policy_extras': policy_extras, 'state_extras': state_extras},
         )
+
+    def context_from_transition(self, transition: Transition):
+        """Extract Wheelbot's invariant state context for cutoff evaluation."""
+        return transition.extras['state_extras']['invariant_physics_state']
 
     @property
     def reset_carry_keys(self):
@@ -738,9 +746,7 @@ class WheelbotEnv(InfopropWrappable):
 
     def augment_prediction(self, member_mean, member_var, curr_model_state, curr_context):
         """Append the 5 integrated odometry dims (yaw, drive/balance angle, x, y) and
-        propagate their variance. Single rollout sample: ``member_mean``/``member_var``
-        are ``[E, model_state_size]``, ``curr_model_state`` ``[model_state_size]``,
-        ``curr_context`` ``[context_size]``; returns ``[E, full_state_size]``."""
+        propagate their variance. Single rollout sample: ``[E, model_state_size]`` in."""
         dt = self.dt
         means_, vars_ = member_mean, member_var
         curr_physics_state, curr_odom_state = curr_model_state, curr_context
@@ -796,14 +802,16 @@ class WheelbotEnv(InfopropWrappable):
         return data, self._get_obs(data, action, track_seed)
 
     def postprocess(self, state, applied_action, next_model_state, next_context,
-                    processed_action, build_pipeline_state):
+                    processed_action):
         """Rebuild the MJX-shaped State, env-owned `info`, and reward from a prediction.
 
         The framework-owned rng + entropy accumulation are already set on ``state``.
+        Skips building the MJX pipeline_state when ``self.fast_model_rollout``.
         """
         track_seed = state.info['track_seed']
         data, obs = self._get_model_data_and_obs(
-            state, next_model_state, next_context, processed_action, track_seed, build_pipeline_state)
+            state, next_model_state, next_context, processed_action, track_seed,
+            build_pipeline_state=not self.fast_model_rollout)
         info = state.info
         info['applied_torque'] = applied_action
         info['physics_state'] = next_model_state
@@ -816,13 +824,14 @@ class WheelbotEnv(InfopropWrappable):
         info['reward_metrics'] = reward_metrics
         return state.replace(reward=reward, done=done, info=info)
 
-    def reset_from_buffer(self, rng, init_transition, build_pipeline_state):
+    def reset_from_buffer(self, rng, init_transition):
         """Reset a model rollout from a sampled real-data physics transition."""
         init_history = init_transition.observation
         track_seed = init_transition.extras['state_extras']['track_seed']
         invariant = init_transition.extras['state_extras']['invariant_physics_state']
         return self.reset_with_init_robot_state(
-            rng, init_history, track_seed, invariant[3:5], invariant[0], build_pipeline_state)
+            rng, init_history, track_seed, invariant[3:5], invariant[0],
+            build_pipeline_state=not self.fast_model_rollout)
 
     def reset_with_init_robot_state(self, rng, init_history, track_seed, init_xy, init_angle,
                                     build_pipeline_state):

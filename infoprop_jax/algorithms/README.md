@@ -43,7 +43,13 @@ At each rollout step, given current state `s_t` and action `a_t`:
    H(s_tilde) = 0.5 * log2(2 * pi * e * conditional_var)
    ```
 
-The next state for the rollout is set to `fused_mean` (propagating only aleatoric uncertainty).
+The next rollout state is then **sampled** as `fused_mean + sqrt(fused_var) * noise`, propagating
+only aleatoric uncertainty.
+
+These steps are env-agnostic and live in `infoprop_jax/envs/infoprop_env.py` (`decode_delta`,
+`infoprop_core`). The environment supplies only the surrounding hooks — `preprocess` (state/action →
+NN inputs), `augment_prediction` (optional extra structure), and `postprocess` (rebuild the State).
+See `infoprop_jax/envs/README.md`.
 
 ## Rollout Termination
 
@@ -62,9 +68,13 @@ Both thresholds are derived automatically from the training buffer — no manual
 
 ## Environment State
 
-Infoprop trains a probabilistic dynamics model on the state representation exposed by the environment. Any environment-specific state factorization, invariance augmentation, task reconstruction, or history window belongs to the environment implementation and documentation.
+Infoprop trains a probabilistic dynamics model on the `model_state` exposed by the environment. Any
+environment-specific state factorization, integrated context, task reconstruction, or history window
+belongs to the environment implementation behind the `InfopropWrappable` contract — the training
+loop here carries no env-specific field names.
 
-For the current Wheelbot setup, see `infoprop_jax/envs/wheelbot/README.md`.
+For the contract, see `infoprop_jax/envs/README.md`; for the Wheelbot specifics,
+`infoprop_jax/envs/wheelbot/README.md`.
 
 ## SAC Policy Training
 
@@ -81,11 +91,14 @@ This yields a large volume of synthetic transitions per real episode.
 
 | File | Role |
 |---|---|
-| `infoprop.py` | **Main training loop.** Model training, cutoff computation, SAC updates, data collection, evaluation. Start here. |
+| `infoprop.py` | **Main training loop (env-agnostic).** Model training, cutoff computation, SAC updates, data collection, evaluation. Start here. |
 | `util/nn/gaussian_env_model.py` | Probabilistic ensemble `{p_e}` — E independent MLPs predicting (mean, logvar). |
 | `util/nn/mlp.py` | Shared MLP backbone for actor, critic, and dynamics model. |
-| `util/model_learning/model_trainer.py` | Orchestrates ensemble training (init, update step, elite selection). |
-| `util/model_learning/model_update_step.py` | Per-member NLL loss and AdamW gradient step. |
+| `util/model_learning/model_trainer.py` | Orchestrates ensemble training (init, NLL update step, normalisation stats). |
+| `util/model_learning/model_update_step.py` | Per-member NLL loss and AdamW gradient step (delta target uses the env `dt`). |
 | `util/model_learning/model_dataset.py` | Physics replay buffer (`ReplayBufferPhysicsState`) and SGD epoch iterator (`ModelDataset`). |
+| `util/agent_learning/sac_networks.py` / `sac_losses.py` | SAC actor/critic networks and losses. |
 | `util/custom_evaluator.py` | Evaluation wrapper reporting mean/std episode returns. |
-| `util/custom_wrapper.py` | Brax wrappers for episode tracking and vmap compatibility. |
+| `util/custom_wrapper.py` | Infoprop training wrappers: `VmapInfopropWrapper` (batched model step from the buffer), `CustomEpisodeWrapper`, and the entropy-aware auto-reset wrappers. |
+
+The Infoprop core math itself lives in `infoprop_jax/envs/infoprop_env.py` (`InfopropEnv`), not here.

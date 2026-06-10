@@ -14,6 +14,8 @@ agent_learning_rate: 0.0003
 agent_batch_size: 1024
 agent_hidden_layer_sizes: [256, 256]
 agent_layer_norm: False
+policy_network_layer_norm: False
+q_network_layer_norm: False
 grad_updates_per_model_step: 10
 num_training_steps_per_model_train: 1000
 num_resampling_epochs: 10
@@ -41,7 +43,6 @@ max_rollout_length: 1000
 lower_quantile: 0.01    # quantile of real-data entropy → λ₂ (accumulated cutoff)
 upper_quantile: 1.0     # quantile of real-data entropy → λ₁ (per-step cutoff)
 action_repeat: 1
-fast_model_rollout: true
 
 # miscellaneous
 num_real_train_envs: 5
