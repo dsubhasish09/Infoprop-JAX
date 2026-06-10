@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Devdutt Subhasish
+# SPDX-License-Identifier: MIT
 """InfopropEnv: the generic, env-agnostic Infoprop Dyna model environment.
 
 `InfopropEnv` is a Brax `Wrapper` that turns any `InfopropWrappable` real MJX env into a

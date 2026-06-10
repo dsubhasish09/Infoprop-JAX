@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Devdutt Subhasish
+# SPDX-License-Identifier: MIT
 """
 Top-level Hydra entry point for the infoprop_jax package.
 

@@ -10,7 +10,7 @@ See infoprop_jax/envs/README.md for the contract and infoprop_jax/envs/wheelbot/
 Wheelbot state/observation/reward details.
 
 Robot dynamics summary:
-  - 2-wheeled differential robot with a reaction wheel for pitch balance.
+  - An underactuated unicycle robot with a reaction wheel for pitch balance.
   - Action: [driving_torque, reaction_wheel_torque] (2D).
   - Total torque = RL action + linear balancing prior (tau_bal).
   - Fixed-frequency control (multiple MJX steps per control step).

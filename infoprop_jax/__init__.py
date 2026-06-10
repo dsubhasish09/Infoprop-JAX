@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Devdutt Subhasish
+# SPDX-License-Identifier: MIT
 # NOTE: These registrations are disabled because they reference non-existent modules.
 # The main training loop uses direct environment instantiation from:
 #   - infoprop_jax.envs.wheelbot.wheelbot_brax_mjx (ground-truth MJX environment)
