@@ -8,7 +8,7 @@
 #SBATCH --account=rwth2087
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:35:00
-#SBATCH --array=1-5
+#SBATCH --array=1
 
 export CUDA_VISIBLE_DEVICES=0
 

@@ -1,4 +1,5 @@
-# Copyright 2025 Devdutt Subhasish
+# Copyright (c) 2026 Devdutt Subhasish
+# SPDX-License-Identifier: MIT
 """
 Infoprop Dyna training loop for the Mini Wheelbot racing task.
 

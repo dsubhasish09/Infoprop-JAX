@@ -3,6 +3,8 @@ name = "infoprop-jax"
 version = "1.0"
 description = "JAX/Brax implementation of Infoprop Dyna."
 readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Devdutt Subhasish", email = "devdutt.subhasish@gmail.com" }]
 requires-python = ">=3.13"
 dependencies = [
     "jax[cuda12]==0.8.0",
