@@ -1,0 +1,17 @@
+# @package _global_
+# Stock Brax 'ant' adapted via DefaultInfopropWrappable (see envs/quadruped/ant.py):
+# model state == observation, no context, reward in model rollouts from the obs-based
+# proxy defined alongside the env.
+
+env:
+  name: Ant
+  env_name: ant
+  backend: mjx
+
+  # History parameters for model learning.
+  obs_history: 1
+  act_history: 0
+
+algorithm:
+  target_entropy: -8   # = -action_dim for ant
+  discounting: 0.99

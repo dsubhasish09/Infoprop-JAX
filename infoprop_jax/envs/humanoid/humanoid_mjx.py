@@ -12,9 +12,8 @@ from jax import numpy as jp
 import mujoco
 from mujoco import mjx
 from jax.scipy.spatial.transform import Rotation
-from brax import math
 from brax import envs
-from brax.envs.base import State
+from brax.envs.base import PipelineEnv, State
 from brax.io import mjcf
 from brax.training.types import Transition
 from omegaconf import dictconfig
@@ -87,18 +86,8 @@ def _jacobian_w2euler(roll: jp.ndarray, pitch: jp.ndarray) -> jp.ndarray:
     )
 
 
-def _euler_rates_to_body_omega(
-    roll: jp.ndarray, pitch: jp.ndarray, euler_rates: jp.ndarray
-) -> jp.ndarray:
-    # The Jacobian returns [roll_rate, pitch_rate, yaw_rate], while this env stores
-    # [yaw_rate, roll_rate, pitch_rate] to mirror Wheelbot.
-    return jp.linalg.solve(
-        _jacobian_w2euler(roll, pitch),
-        euler_rates[jp.array([1, 2, 0])],
-    )
 
-
-class HumanoidEnv(InfopropWrappable):
+class HumanoidEnv(PipelineEnv, InfopropWrappable):
     """Classic Humanoid MJX task plus Infoprop wrapping hooks."""
 
     def __init__(
@@ -112,11 +101,13 @@ class HumanoidEnv(InfopropWrappable):
         reset_noise_scale: float | None = None,
         exclude_current_positions_from_observation: bool | None = None,
         eval_mode: bool = False,
+        mj_model: mujoco.MjModel | None = None,
         **kwargs,
     ):
-        mj_model = mujoco.MjModel.from_xml_path(
-            (HUMANOID_ROOT_PATH / "humanoid.xml").as_posix()
-        )
+        if mj_model is None:
+            mj_model = mujoco.MjModel.from_xml_path(
+                (HUMANOID_ROOT_PATH / "humanoid.xml").as_posix()
+            )
         mj_model.opt.solver = mujoco.mjtSolver.mjSOL_CG
         mj_model.opt.iterations = 6
         mj_model.opt.ls_iterations = 6
@@ -126,6 +117,7 @@ class HumanoidEnv(InfopropWrappable):
         kwargs["backend"] = "mjx"
         super().__init__(sys, **kwargs)
 
+        self._reward_scale = cfg.get("reward_scale", 0.1)
         self._forward_reward_weight = cfg.get(
             "forward_reward_weight",
             1.25 if forward_reward_weight is None else forward_reward_weight,
@@ -157,7 +149,7 @@ class HumanoidEnv(InfopropWrappable):
             else exclude_current_positions_from_observation,
         )
         self.obs_history = cfg.get("obs_history", 1)
-        self.act_history = cfg.get("act_history", 1)
+        self.act_history = cfg.get("act_history", 0)
         # Env-owned fast-rollout flag: skip building the MJX pipeline_state during
         # model rollouts. The framework is agnostic to this; see InfopropWrappable.
         self.fast_model_rollout = cfg.get("fast_model_rollout", True)
@@ -203,7 +195,9 @@ class HumanoidEnv(InfopropWrappable):
                 "policy_extras": policy_extras,
                 "state_extras": {
                     "truncation": next_state.info.get("truncation", 0.0),
-                    "invariant_physics_state": next_state.info[
+                    # Context at the same timestep as the last history entry: consumers
+                    # (reset_from_buffer, get_cutoffs) pair it with that state.
+                    "invariant_physics_state": prev_state.info[
                         "invariant_physics_state"
                     ],
                 },
@@ -230,7 +224,7 @@ class HumanoidEnv(InfopropWrappable):
         euler_rates = (_jacobian_w2euler(roll, pitch) @ data.qvel[3:6])[
             jp.array([2, 0, 1])
         ]
-        body_vel = math.inv_rotate(data.qvel[:3], quat)
+        body_vel = (_ry(-pitch) @ _rx(-roll) @ _rz(-yaw) @ data.qvel[:3, None]).flatten()
         return jp.concatenate(
             [
                 data.qpos[2:3],
@@ -257,10 +251,15 @@ class HumanoidEnv(InfopropWrappable):
         yaw, x, y = context
         quat = _mat_to_quat(_yrp(yaw, roll_pitch[0], roll_pitch[1]))
         qpos = jp.concatenate([jp.array([x, y]), z, quat, joint_qpos], axis=-1)
-        body_omega = _euler_rates_to_body_omega(
-            roll_pitch[0], roll_pitch[1], euler_rates
+        yaw_rate, roll_rate, pitch_rate = euler_rates
+        rot = _yrp(yaw, roll_pitch[0], roll_pitch[1])
+        world_omega = (
+            jp.array([0.0, 0.0, yaw_rate])
+            + _rz(yaw) @ jp.array([roll_rate, 0.0, 0.0])
+            + _rz(yaw) @ _rx(roll_pitch[0]) @ jp.array([0.0, pitch_rate, 0.0])
         )
-        qvel = jp.concatenate([math.rotate(body_vel, quat), body_omega, joint_qvel])
+        # MuJoCo free-joint qvel: linear velocity in world frame, angular in body frame.
+        qvel = jp.concatenate([rot @ body_vel, rot.T @ world_omega, joint_qvel])
         return qpos, qvel
 
     def _get_obs_from_states(
@@ -272,7 +271,7 @@ class HumanoidEnv(InfopropWrappable):
         joint_qpos = physics_state[9 : 9 + (self.sys.nq - 7)]
         joint_qvel = physics_state[9 + (self.sys.nq - 7) :]
         orientation = jp.concatenate([yaw, roll_pitch])
-        velocity = jp.concatenate([physics_state[3:9], joint_qvel])
+        velocity = jp.concatenate([physics_state[6:9], physics_state[3:6], joint_qvel])
         position = jp.concatenate([invariant_physics_state[1:], z, orientation, joint_qpos])
         if self._exclude_current_positions_from_observation:
             position = position[2:]
@@ -285,7 +284,6 @@ class HumanoidEnv(InfopropWrappable):
 
     def _get_rew_from_states(
         self,
-        prev_context: jp.ndarray,
         physics_state: jp.ndarray,
         context: jp.ndarray,
         action: jp.ndarray,
@@ -304,7 +302,7 @@ class HumanoidEnv(InfopropWrappable):
         done = jp.where(
             self._terminate_when_unhealthy, 1.0 - is_healthy, jp.array(0.0)
         )
-        reward = forward_reward + healthy_reward - ctrl_cost
+        reward = self._reward_scale * (forward_reward + healthy_reward - ctrl_cost)
         reward_metrics = {
             "forward_reward": forward_reward,
             "reward_linvel": forward_reward,
@@ -320,18 +318,19 @@ class HumanoidEnv(InfopropWrappable):
 
     def _get_rew(self, state: State, action: jp.ndarray):
         return self._get_rew_from_states(
-            state.info["prev_invariant_physics_state"],
             state.info["physics_state"],
             state.info["invariant_physics_state"],
             action,
         )
 
     def reset(self, rng: jp.ndarray) -> State:
-        rng, rng1, rng2 = jax.random.split(rng, 3)
+        rng, rng1, rng2, rng3 = jax.random.split(rng, 4)
         low, hi = -self._reset_noise_scale, self._reset_noise_scale
         qpos = self.sys.qpos0 + jax.random.uniform(
             rng1, (self.sys.nq,), minval=low, maxval=hi
         )
+        euler_noise = jax.random.uniform(rng3, (3,), minval=low, maxval=hi)
+        qpos = qpos.at[3:7].set(_mat_to_quat(_yrp(*euler_noise)))
         qvel = jax.random.uniform(rng2, (self.sys.nv,), minval=low, maxval=hi)
         data = self.pipeline_init(qpos, qvel)
         action = jp.zeros(self.action_size)
@@ -365,8 +364,6 @@ class HumanoidEnv(InfopropWrappable):
             "applied_action": action,
             "phys_state_history": phys_history,
             "act_history": act_history,
-            "prev_pipeline_state": data,
-            "prev_invariant_physics_state": invariant_physics_state,
             "reward_metrics": reward_metrics,
             "rng": rng,
         }
@@ -388,8 +385,6 @@ class HumanoidEnv(InfopropWrappable):
         invariant_physics_state = self._invariant_physics_state(data)
         obs = self._get_obs_from_states(physics_state, invariant_physics_state)
         info = state.info
-        info["prev_pipeline_state"] = data0
-        info["prev_invariant_physics_state"] = info["invariant_physics_state"]
         info["physics_state"] = physics_state
         info["invariant_physics_state"] = invariant_physics_state
         info["applied_action"] = action
@@ -423,22 +418,15 @@ class HumanoidEnv(InfopropWrappable):
         next_euler_rates = member_mean[:, 3:6]
         yaw = curr_yaw_xy[0] + dt * (curr_euler_rates[0] + next_euler_rates[:, 0]) / 2
 
-        curr_body_vel = curr_model_state[6:9]
-        next_body_vel = member_mean[:, 6:9]
-        curr_roll, curr_pitch = curr_model_state[1], curr_model_state[2]
-        curr_rot = _yrp(curr_yaw_xy[0], curr_roll, curr_pitch)
-
-        def rotate_next(mean_i, yaw_i):
-            return _yrp(yaw_i, mean_i[1], mean_i[2]) @ mean_i[6:9]
-
-        curr_world_vel = curr_rot @ curr_body_vel
-        next_world_vel = jax.vmap(rotate_next)(member_mean, yaw)
+        curr_rot = _yrp(curr_yaw_xy[0], curr_model_state[1], curr_model_state[2])
+        curr_world_vel = curr_rot @ curr_model_state[6:9]
+        next_world_vel = (curr_rot[None] @ member_mean[:, 6:9, None]).squeeze(-1)
         xy = curr_yaw_xy[1:3] + dt * (curr_world_vel[None, :2] + next_world_vel[:, :2]) / 2
         context_mean = jp.concatenate([yaw[:, None], xy], axis=-1)
         full_mean = jp.concatenate([member_mean, context_mean], axis=-1)
 
         yaw_var = (dt / 2) ** 2 * member_var[:, 3]
-        xy_var = (dt / 2) ** 2 * member_var[:, 6:8]
+        xy_var = (dt / 2) ** 2 * (jp.square(curr_rot)[None] @ member_var[:, 6:9, None]).squeeze(-1)[:, :2]
         context_var = jp.concatenate([yaw_var[:, None], xy_var], axis=-1)
         full_var = jp.concatenate([member_var, context_var], axis=-1)
         return full_mean, full_var
@@ -452,15 +440,12 @@ class HumanoidEnv(InfopropWrappable):
         processed_action,
     ):
         build_pipeline_state = not self.fast_model_rollout
-        data0 = state.pipeline_state
         data = None
         if build_pipeline_state:
             qpos, qvel = self._split_physics_state(next_model_state, next_context)
             data = self.pipeline_init(qpos, qvel)
         obs = self._get_obs_from_states(next_model_state, next_context)
         info = state.info
-        info["prev_pipeline_state"] = data0
-        info["prev_invariant_physics_state"] = info["invariant_physics_state"]
         info["physics_state"] = next_model_state
         info["invariant_physics_state"] = next_context
         info["applied_action"] = applied_action
@@ -497,8 +482,6 @@ class HumanoidEnv(InfopropWrappable):
             "applied_action": action,
             "phys_state_history": init_phys_history,
             "act_history": init_act_history,
-            "prev_pipeline_state": data,
-            "prev_invariant_physics_state": invariant_physics_state,
             "accumulated_conditional_entropy": jp.zeros((self.full_state_size,)),
             "current_conditional_entropy": jp.zeros((self.full_state_size,)),
             "reward_metrics": {

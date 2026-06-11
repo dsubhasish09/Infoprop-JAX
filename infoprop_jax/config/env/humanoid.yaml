@@ -1,19 +1,31 @@
-name: Humanoid
-env_name: humanoid
+# @package _global_
+# Writes to the global config: env-specific keys live under `env:`, and any
+# algorithm values the environment forces go under `algorithm:` (they override
+# algorithm/infoprop.yaml because `env` composes after `algorithm` in main.yaml).
 
-control_interval: 5
-forward_reward_weight: 1.25
-ctrl_cost_weight: 0.1
-healthy_reward: 5.0
-terminate_when_unhealthy: true
-healthy_z_range: [1.0, 2.0]
-reset_noise_scale: 1e-2
-exclude_current_positions_from_observation: true
+env:
+  name: Humanoid
+  env_name: humanoid
 
-# History parameters for model learning. Humanoid predicts a local floating-base
-# state and carries [yaw, x, y] as integrated context.
-obs_history: 1
-act_history: 1
+  control_interval: 5
+  reward_scale: 0.1
+  forward_reward_weight: 1.25
+  ctrl_cost_weight: 0.1
+  healthy_reward: 5.0
+  terminate_when_unhealthy: true
+  healthy_z_range: [1.0, 2.0]
+  reset_noise_scale: 1e-2
+  exclude_current_positions_from_observation: true
 
-# Skip building the MJX pipeline_state during model rollouts (env-side optimisation).
-fast_model_rollout: true
+  # History parameters for model learning. Humanoid predicts a local floating-base
+  # state and carries [yaw, x, y] as integrated context.
+  obs_history: 1
+  act_history: 0
+
+  # Skip building the MJX pipeline_state during model rollouts (env-side optimisation).
+  fast_model_rollout: true
+
+algorithm:
+  target_entropy: -21   # = -action_dim for the 21-dof humanoid
+  upper_quantile: 0.99
+  discounting: 0.99

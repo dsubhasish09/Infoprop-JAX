@@ -1,0 +1,44 @@
+# @package _global_
+# Writes to the global config: env-specific keys live under `env:`, and any
+# algorithm values the environment forces go under `algorithm:` (they override
+# algorithm/infoprop.yaml because `env` composes after `algorithm` in main.yaml).
+
+env:
+  name: HumanoidRace
+  env_name: humanoid_race
+
+  control_interval: 5
+  healthy_z_range: [1.0, 2.0]
+  reset_noise_scale: 1e-2
+  exclude_current_positions_from_observation: true
+
+  # Racing reward (Wheelbot form): unhealthy z or off-track terminates with the
+  # crash penalty; no ctrl cost, no alive bonus. Weights are Wheelbot-derived
+  # starting points and will need tuning.
+  ct_weight: 2.5
+  ca_weight: 2.5
+  driving_weight: 10.0
+  crash_penalty: -200.0
+  rew_scale: 1.0
+
+  # Trajectory observation (scaled track: width ~6 m, segments ~0.66 m).
+  lookahead: 10
+  sin_cos_encoding: false
+
+  # Reset randomization defaults to code values derived from the scaled track width:
+  # init_xy_std = track_width/16, init_angle_std = pi/16,
+  # resample_init_xy_std = track_width/3, resample_init_angle_std = pi/3.
+
+  # History parameters for model learning. Same local floating-base model state as
+  # the plain humanoid with [yaw, x, y] integrated context.
+  obs_history: 1
+  act_history: 0
+
+  # Skip building the MJX pipeline_state during model rollouts (env-side optimisation).
+  fast_model_rollout: true
+
+algorithm:
+  target_entropy: -10.5   # = -action_dim for the 21-dof humanoid
+  upper_quantile: 0.99
+  discounting: 0.99
+  num_trials: 50

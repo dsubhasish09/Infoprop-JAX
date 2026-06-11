@@ -8,12 +8,17 @@ To add a new environment:
      export the class from that subpackage's ``__init__.py``.
   2. Add a ``name -> class`` entry to ``ENV_REGISTRY`` below.
 
+Stock Brax envs need no porting: subclass ``DefaultInfopropWrappable`` with an
+obs-based reward function (see ``quadruped/ant.py`` for the worked example) and
+register the class below.
+
 Nothing else needs to change: importing ``infoprop_jax.envs`` (which the training
 entry point does) will register it automatically.
 """
 from brax import envs
 
-from infoprop_jax.envs.humanoid import HumanoidEnv
+from infoprop_jax.envs.humanoid import HumanoidEnv, HumanoidRaceEnv
+from infoprop_jax.envs.quadruped import AntEnv
 from infoprop_jax.envs.wheelbot import WheelbotEnv
 
 # Maps the config-facing environment name to its Brax env class.
@@ -21,6 +26,8 @@ from infoprop_jax.envs.wheelbot import WheelbotEnv
 ENV_REGISTRY = {
     "wheelbot": WheelbotEnv,
     "humanoid": HumanoidEnv,
+    "humanoid_race": HumanoidRaceEnv,
+    "ant": AntEnv,
 }
 
 

@@ -34,19 +34,22 @@ def rotation_to_align(p1, p2):
     return angle_deg
 
 
-def create_line_element(pos, angle, length, rgba):
+def create_line_element(pos, angle, length, rgba, half_width=0.005, half_height=0.0001, z=0.0):
     line_element = ET.Element("geom")
     line_element.set("type", "box")
-    line_element.set("size", f"{length / 2} 0.005  0.0001")
-    line_element.set("pos", f"{pos[0]} {pos[1]} 0")
+    line_element.set("size", f"{length / 2} {half_width}  {half_height}")
+    line_element.set("pos", f"{pos[0]} {pos[1]} {z}")
     line_element.set("euler", f"0 0 {angle}")
     line_element.set("rgba", f"{rgba[0]} {rgba[1]} {rgba[2]} {rgba[3]}")
+    # Visual marker only: must never collide with the robot.
+    line_element.set("contype", "0")
+    line_element.set("conaffinity", "0")
     return line_element
 
 
-def compute_line_element(p1, p2, rgba=[0.9, 0, 0, 1]):
-    """Return the length of the line element (Jacobian factor) for numerical integration."""
+def compute_line_element(p1, p2, rgba=[0.9, 0, 0, 1], half_width=0.005, half_height=0.0001, z=0.0):
+    """Build a box geom XML element marking the track-boundary segment p1->p2."""
     pos = midpoint(p1, p2)
     angle = rotation_to_align(p1, p2)
     length = distance(p1, p2)
-    return create_line_element(pos, angle, length, rgba)
+    return create_line_element(pos, angle, length, rgba, half_width, half_height, z)

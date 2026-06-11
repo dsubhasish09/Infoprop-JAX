@@ -1,6 +1,9 @@
 # Copyright (c) 2026 Devdutt Subhasish
 # SPDX-License-Identifier: MIT
-"""Video evaluation for InfoProp Dyna checkpoints.
+"""Video evaluation for InfoProp Dyna checkpoints (Wheelbot).
+
+`run` dispatches on the checkpoint's training config: humanoid checkpoints are routed
+to `video_eval_humanoid.run`; everything else uses the Wheelbot flow below.
 
 Can be invoked in two ways:
 
@@ -24,14 +27,17 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import mediapy as media
 import numpy as np
-from brax import envs
 from brax.io import model as brax_model
-from brax.training.acme import running_statistics
-from brax.training.agents.sac import networks as sac_networks
 from omegaconf import OmegaConf
 
-from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import WheelbotEnv as RealWheelbot
 from infoprop_jax.envs.infoprop_env import InfopropEnv
+from infoprop_jax.eval_scripts.eval_utils import (
+    build_policy_inference,
+    infer_sizes,
+    inject_model_params,
+    resolve_iteration,
+    wire_model_env,
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -56,39 +62,6 @@ def _combine_physics_states(physics_11d, invariant_5d):
         physics_11d[8],    # y_rate
         physics_11d[9],    # z_rate
     ])
-
-
-def _resolve_iteration(log_dir, requested):
-    policy_dir = os.path.join(log_dir, 'policy')
-    if not os.path.isdir(policy_dir):
-        raise FileNotFoundError(f'Policy directory not found: {policy_dir}')
-    indices = []
-    for name in os.listdir(policy_dir):
-        if name.startswith('brax_policy_'):
-            try:
-                indices.append(int(name.split('_')[-1]))
-            except ValueError:
-                pass
-    if not indices:
-        raise FileNotFoundError(f'No brax_policy_* files found in {policy_dir}')
-    if requested is not None:
-        if requested not in indices:
-            raise ValueError(
-                f'Requested iteration {requested} not found in {policy_dir} '
-                f'(available: {sorted(indices)})')
-        return requested
-    return max(indices)
-
-
-def _infer_sizes(policy_params):
-    layers = policy_params['params']
-    sorted_keys = sorted(
-        (k for k in layers if k.startswith('hidden_')),
-        key=lambda k: int(k.split('_')[1]))
-    obs_size = layers[sorted_keys[0]]['kernel'].shape[0]
-    # SAC last layer outputs [mean, log_std] concatenated → 2 * action_size
-    action_size = layers[sorted_keys[-1]]['kernel'].shape[1] // 2
-    return obs_size, action_size
 
 
 def _do_real_rollout(jit_step, jit_inf, params, state, rng, max_steps):
@@ -121,6 +94,8 @@ def _do_model_rollout(jit_step_model, state, ctrls):
         if (step + 1) % 500 == 0:
             print(f'  model step {step + 1}', flush=True)
         if float(ns.done) > 0.5:
+            print(f'  model rollout done at step {step + 1} '
+                  f'(info_cutoff={float(ns.info["info_cutoff"]):.0f})', flush=True)
             break
     return ps_list, np.stack(phys_list), np.stack(inv_list)
 
@@ -176,8 +151,15 @@ def run(eval_cfg):
     env_cfg   = train_cfg.env
     algo_cfg  = train_cfg.algorithm
 
+    # Dispatch on the checkpoint's environment.
+    if env_cfg.get('env_name', '') in ('humanoid', 'humanoid_race'):
+        from infoprop_jax.eval_scripts.video_eval_humanoid import run_loaded
+        return run_loaded(eval_cfg, log_dir, env_cfg, algo_cfg)
+
+    from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import WheelbotEnv as RealWheelbot
+
     # ── Resolve iteration ─────────────────────────────────────────────────────
-    iteration = _resolve_iteration(log_dir, eval_cfg.iteration)
+    iteration = resolve_iteration(log_dir, eval_cfg.iteration)
     print(f'Evaluating iteration {iteration} on track seed {eval_cfg.track_seed}', flush=True)
 
     # ── Output dir ────────────────────────────────────────────────────────────
@@ -189,37 +171,20 @@ def run(eval_cfg):
     policy_path = os.path.join(log_dir, 'policy', f'brax_policy_{iteration}')
     print(f'Loading policy from {policy_path}', flush=True)
     normalizer_params, policy_params = brax_model.load_params(policy_path)
-    obs_size, action_size = _infer_sizes(policy_params)
+    obs_size, action_size = infer_sizes(policy_params)
     print(f'  obs_size={obs_size}  action_size={action_size}', flush=True)
 
     # ── Build real env ────────────────────────────────────────────────────────
     print('Building real environment...', flush=True)
     t0 = time.time()
-    envs.register_environment('_eval_real', RealWheelbot)
-    env_real = envs.get_environment('_eval_real', cfg=env_cfg,
-                                    visualize=True, track_seed=eval_cfg.track_seed)
+    env_real = RealWheelbot(cfg=env_cfg, visualize=True, track_seed=eval_cfg.track_seed)
     jit_reset_real = jax.jit(env_real.reset_to_start)
     jit_step_real  = jax.jit(env_real.step)
     print(f'  done in {time.time()-t0:.1f}s', flush=True)
 
     # ── Build SAC inference fn ────────────────────────────────────────────────
-    normalize_fn = running_statistics.normalize if algo_cfg.normalize_observations else (lambda x, y: x)
-    sac_net = sac_networks.make_sac_networks(
-        observation_size=obs_size,
-        action_size=action_size,
-        preprocess_observations_fn=normalize_fn,
-        hidden_layer_sizes=tuple(algo_cfg.agent_hidden_layer_sizes),
-        policy_network_layer_norm=algo_cfg.get(
-            'policy_network_layer_norm', algo_cfg.agent_layer_norm),
-        q_network_layer_norm=algo_cfg.get(
-            'q_network_layer_norm', algo_cfg.agent_layer_norm),
-    )
-    make_policy = sac_networks.make_inference_fn(sac_net)
-    params = (normalizer_params, policy_params)
-
-    @jax.jit
-    def jit_inf(p, obs, rng):
-        return make_policy(p, deterministic=True)(obs, rng)
+    params, jit_inf = build_policy_inference(
+        algo_cfg, obs_size, action_size, normalizer_params, policy_params)
 
     # ── Real rollout ──────────────────────────────────────────────────────────
     rng = jax.random.PRNGKey(eval_cfg.rng_seed)
@@ -239,8 +204,8 @@ def run(eval_cfg):
     ps_r, phys_r, inv_r, ctrls = _do_real_rollout(
         jit_step_real, jit_inf, params, init_state, eval_rng, eval_cfg.max_steps)
     rlen_r = len(ps_r)
-    real_phys_10d = np.concatenate([init_r_phys[None], phys_r], axis=0)
-    real_inv_6d   = np.concatenate([init_r_inv[None],  inv_r],  axis=0)
+    real_phys_arr = np.concatenate([init_r_phys[None], phys_r], axis=0)
+    real_inv_arr  = np.concatenate([init_r_inv[None],  inv_r],  axis=0)
     print(f'Real rollout: {rlen_r} steps in {time.time()-t0:.1f}s', flush=True)
 
     # ── Render real video ─────────────────────────────────────────────────────
@@ -265,31 +230,18 @@ def run(eval_cfg):
         t0 = time.time()
         model_ckpt = brax_model.load_params(model_state_path)
 
+        wrapped = RealWheelbot(cfg=env_cfg, visualize=True,
+                               track_seed=eval_cfg.track_seed)
+        # fast_model_rollout is env-owned: disable it so model rollouts build
+        # the MJX pipeline_state needed for rendering.
+        wrapped.fast_model_rollout = False
         env_model = InfopropEnv(
-            envs.get_environment('_eval_real', cfg=env_cfg, visualize=True,
-                                 track_seed=eval_cfg.track_seed),
-            min_log_var=algo_cfg.min_log_var, max_log_var=algo_cfg.max_log_var,
-            fast_model_rollout=False)
+            wrapped,
+            min_log_var=algo_cfg.min_log_var, max_log_var=algo_cfg.max_log_var)
         jit_step_model  = jax.jit(env_model.step)
         jit_reset_model = jax.jit(env_model.reset_with_init_robot_state_eval)
 
-        model_trainer = env_model.init_NN_trainer(
-            seed=0, learning_rate=1e-3, weight_decay=1e-4,
-            hidden_layer_sizes=tuple(algo_cfg.model_hidden_layer_sizes),
-            model_layer_norm=algo_cfg.model_layer_norm,
-        )
-        model_state_template, _, _, _, _, _, _ = model_trainer.init(jax.random.PRNGKey(0))
-        model_state = model_state_template.replace(
-            params=jax.tree_util.tree_map(jnp.array, model_ckpt['params']))
-        env_model._model_apply_fn = model_state.apply_fn
-
-        model_obs_mean        = jnp.array(model_ckpt['model_obs_mean'])
-        model_obs_std         = jnp.array(model_ckpt['model_obs_std'])
-        next_state_delta_mean = jnp.array(model_ckpt['next_state_delta_mean'])
-        next_state_delta_std  = jnp.array(model_ckpt['next_state_delta_std'])
-        per_step_cutoff       = jnp.array(model_ckpt['per_step_cutoff'])
-        accumulated_cutoff    = jnp.array(model_ckpt['accumulated_cutoff'])
-        binning_entropy       = jnp.array(model_ckpt['binning_entropy'])
+        model_state = wire_model_env(env_model, algo_cfg, model_ckpt)
         print(f'  model env ready in {time.time()-t0:.1f}s', flush=True)
 
         print('Resetting model env and running rollout...', flush=True)
@@ -297,25 +249,16 @@ def run(eval_cfg):
         state_model = jit_reset_model(
             model_reset_rng, init_history, track_seed_val,
             invariant_physics_state[3:5], invariant_physics_state[0])
-        state_model = env_model.put_in_NN_params_and_rng(
-            model_state.params, model_obs_mean, model_obs_std,
-            next_state_delta_mean, next_state_delta_std,
-            per_step_cutoff, accumulated_cutoff, binning_entropy,
-            model_env_rng, state_model,
-        )
-        _mi = dict(state_model.info)
-        for _k in ('kalman_gain', 'conditional_var', 'fused_var', 'fused_mean', 'epist_var'):
-            if _k not in _mi:
-                _mi[_k] = jnp.zeros(16)
-        state_model = state_model.replace(info=_mi)
+        state_model = inject_model_params(
+            env_model, model_state, model_ckpt, model_env_rng, state_model)
         init_m_ps   = state_model.pipeline_state
         init_m_phys = np.array(state_model.info['physics_state'])
         init_m_inv  = np.array(state_model.info['invariant_physics_state'])
 
         ps_m, phys_m, inv_m = _do_model_rollout(jit_step_model, state_model, ctrls)
         rlen_m = len(ps_m)
-        model_phys_10d = np.concatenate([init_m_phys[None], phys_m], axis=0)
-        model_inv_6d   = np.concatenate([init_m_inv[None],  inv_m],  axis=0)
+        model_phys_arr = np.concatenate([init_m_phys[None], phys_m], axis=0)
+        model_inv_arr  = np.concatenate([init_m_inv[None],  inv_m],  axis=0)
         print(f'Model rollout: {rlen_m} steps in {time.time()-t0:.1f}s', flush=True)
 
         print(f'Rendering model video ({rlen_m+1} frames)...', flush=True)
@@ -330,7 +273,7 @@ def run(eval_cfg):
         print('Creating physics comparison plot...', flush=True)
         t0 = time.time()
         plot_path = os.path.join(output_dir, 'physics_comparison.png')
-        _physics_plot(real_phys_10d, real_inv_6d, model_phys_10d, model_inv_6d,
+        _physics_plot(real_phys_arr, real_inv_arr, model_phys_arr, model_inv_arr,
                       plot_path, iteration)
         print(f'  saved in {time.time()-t0:.1f}s → {plot_path}', flush=True)
 
@@ -347,13 +290,13 @@ def main():
     parser.add_argument('--iteration', type=int, default=None, dest='iteration',
                         help='Policy checkpoint index (default: latest)')
     parser.add_argument('--track-seed', type=int, default=21, dest='track_seed',
-                        help='Track seed to evaluate on (default: 21)')
+                        help='Track seed to evaluate on (wheelbot only, default: 21)')
     parser.add_argument('--output-dir', default=None, dest='output_dir',
                         help='Output directory (default: <log_dir>/video_eval/iter_<N>/)')
     parser.add_argument('--no-model', action='store_true', dest='no_model',
                         help='Skip model rollout and physics comparison plot')
     parser.add_argument('--max-steps', type=int, default=10000, dest='max_steps',
-                        help='Max steps for real rollout (default: 2000)')
+                        help='Max steps for real rollout (default: 10000)')
     parser.add_argument('--rng-seed', type=int, default=0, dest='rng_seed',
                         help='JAX RNG seed (default: 0)')
     args = parser.parse_args()
