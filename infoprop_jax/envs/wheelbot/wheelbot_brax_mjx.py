@@ -203,7 +203,7 @@ max_length = max(trajectory_lengths)
 trajectories_flattened = jp.array([pad_line_segments_to_size(t, max_length) for t in trajectories])
 
 
-class WheelbotEnv(InfopropWrappable):
+class WheelbotEnv(PipelineEnv, InfopropWrappable):
     """Wheelbot MJX env: real MuJoCo-MJX physics + the Infoprop hooks.
 
     As an ``InfopropWrappable`` it is both the ground-truth data-collection / eval env
@@ -352,7 +352,9 @@ class WheelbotEnv(InfopropWrappable):
         state_extras = {
             'truncation': next_state.info['truncation'],
             'track_seed': next_state.info['track_seed'],
-            'invariant_physics_state': next_state.info['invariant_physics_state'],
+            # Context at the same timestep as the last history entry: consumers
+            # (reset_from_buffer, get_cutoffs) pair it with that state.
+            'invariant_physics_state': prev_state.info['invariant_physics_state'],
         }
         return Transition(
             observation=jp.concatenate(

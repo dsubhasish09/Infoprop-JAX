@@ -39,6 +39,7 @@ from brax.training.types import PRNGKey
 from flax.training.train_state import TrainState
 
 from infoprop_jax.algorithms.util.custom_evaluator import CustomEvaluator
+from infoprop_jax.envs.contract_validation import validate_infoprop_contract
 from infoprop_jax.algorithms.util.custom_wrapper import wrap_custom, wrap
 from infoprop_jax.algorithms.util.model_learning.model_dataset import ReplayBufferPhysicsState
 from infoprop_jax.algorithms.util.model_learning.model_trainer import compute_loss
@@ -164,13 +165,13 @@ def train(
     normalize_observations: bool = False,
     reward_scaling: float = 1.0,
     tau: float = 0.005,
-    min_physics_replay_size: int = 0,
-    max_physics_replay_size: Optional[int] = None,
-    min_model_replay_size: int = 0,
-    max_model_replay_size: Optional[int] = None,
-    grad_updates_per_model_step: int = 1,
-    num_resampling_epochs: int = 10,
-    num_training_steps_per_model_train: int = 100,
+    real_steps_per_trial: int = 0,
+    physics_buffer_size: Optional[int] = None,
+    utd_ratio: int = 1,
+    epochs_per_trial: int = 10,
+    model_steps_per_epoch: int = 100,
+    model_subsampling: float = 1.0,
+    keep_past_epoch: bool = True,
     network_factory: types.NetworkFactory[
         sac_networks.SACNetworks
     ] = sac_networks.make_sac_networks,
@@ -184,16 +185,13 @@ def train(
     upper_quantile: float = 0.95,
     patience: int = 10,
     model_layer_norm: bool = True,
-    agent_layer_norm: bool = True,
-    policy_network_layer_norm: Optional[bool] = None,
-    q_network_layer_norm: Optional[bool] = None,
+    policy_network_layer_norm: bool = False,
+    q_network_layer_norm: bool = True,
     eval_environment = None,
     progress_fn = None,
     randomization_fn: Optional[
         Callable[[base.System, jnp.ndarray], Tuple[base.System, base.System]]
     ] = None,
-    obs_history: int = 1,
-    act_history: int = 0,
     tune_entropy: bool = True,
     alpha: float = 0.1,
     reset_agent_per_trial: bool = False,
@@ -216,11 +214,16 @@ def train(
       ... (remaining args are passed through from Hydra config)
   """
 #   jax.config.update("jax_log_compiles", True)
-  # Model-state dimensions and control timestep, sourced from the model environment
-  # so the generic loop carries no Wheelbot-specific magic numbers.
-  model_state_size = model_environment.model_state_size
-  context_size = model_environment.context_size
-  full_state_size = model_environment.full_state_size
+  # Model-state dimensions inferred from the env's data contract (the dummy
+  # transition sizes the physics buffer, so it is the single source of truth);
+  # histories and control timestep read off the env itself.
+  validate_infoprop_contract(environment)
+  _dummy = environment.dummy_physics_transition
+  model_state_size = _dummy.next_observation.shape[-1]
+  context_size = environment.context_from_transition(_dummy).shape[-1]
+  full_state_size = model_state_size + context_size
+  obs_history = environment.obs_history
+  act_history = environment.act_history
   model_action_size = model_environment.action_size
   model_dt = model_environment.dt
   process_id = jax.process_index()
@@ -234,9 +237,40 @@ def train(
 
   # The number of environment steps executed for every `actor_step()` call.
   env_steps_per_actor_step = action_repeat * num_envs
-  # equals to ceil(min_replay_size / env_steps_per_actor_step)
-  num_prefill_actor_steps = -(-min_model_replay_size // num_envs)
-  num_prefill_real_actor_steps = -(-min_physics_replay_size // num_real_envs)
+  # equals to ceil(real_steps_per_trial / num_real_envs)
+  num_prefill_real_actor_steps = -(-real_steps_per_trial // num_real_envs)
+
+  # Derived buffer sizes. Each model env step generates num_envs transitions of
+  # which a fixed `kept_transitions_per_step` subset is inserted into the SAC
+  # replay buffer; the buffer is sized to hold exactly what one trial
+  # (keep_past_epoch=True) or one epoch (False) inserts, so these never drift
+  # apart when the rollout knobs change.
+  if not 0.0 < model_subsampling <= 1.0:
+    raise ValueError(f'model_subsampling must be in (0, 1], got {model_subsampling}')
+  kept_transitions_per_step = max(1, round(model_subsampling * num_envs))
+  max_model_replay_size = (
+      (epochs_per_trial if keep_past_epoch else 1)
+      * model_steps_per_epoch
+      * kept_transitions_per_step
+  )
+  if physics_buffer_size is None:
+    physics_buffer_size = num_trials * real_steps_per_trial
+  max_physics_replay_size = physics_buffer_size
+
+  # Sample reuse per epoch: SGD draws vs. transitions inserted. High reuse is
+  # the critic-overestimation risk direction, so surface it loudly.
+  samples_drawn_per_epoch = agent_batch_size * utd_ratio * model_steps_per_epoch
+  replay_ratio = samples_drawn_per_epoch / (model_steps_per_epoch * kept_transitions_per_step)
+  logging.info(
+      'model buffer size: %s (kept %s/%s transitions per step), replay ratio: %.1f',
+      max_model_replay_size, kept_transitions_per_step, num_envs, replay_ratio,
+  )
+  if replay_ratio > 50:
+    logging.warning(
+        'replay ratio %.1f exceeds 50: each model transition is reused many times '
+        'per epoch, which risks critic overestimation. Lower utd_ratio or raise '
+        'model_subsampling/num_model_envs.', replay_ratio,
+    )
  
   rng = jax.random.PRNGKey(seed)
   rng, key = jax.random.split(rng)
@@ -291,16 +325,8 @@ def train(
       action_size=action_size,
       preprocess_observations_fn=normalize_fn,
       hidden_layer_sizes = agent_hidden_layer_sizes,
-      policy_network_layer_norm=(
-          agent_layer_norm
-          if policy_network_layer_norm is None
-          else policy_network_layer_norm
-      ),
-      q_network_layer_norm=(
-          agent_layer_norm
-          if q_network_layer_norm is None
-          else q_network_layer_norm
-      ),
+      policy_network_layer_norm=policy_network_layer_norm,
+      q_network_layer_norm=q_network_layer_norm,
   )
   make_policy = sac_networks.make_inference_fn(sac_network)
 
@@ -350,13 +376,13 @@ def train(
   model_replay_buffer =  replay_buffers.UniformSamplingQueue(
       max_replay_size=max_model_replay_size // device_count,
       dummy_data_sample=dummy_transition,
-      sample_batch_size=agent_batch_size * grad_updates_per_model_step * num_training_steps_per_model_train // device_count,
+      sample_batch_size=agent_batch_size * utd_ratio * model_steps_per_epoch // device_count,
   )
   # real replay buffer
   replay_buffer = replay_buffers.UniformSamplingQueue(
       max_replay_size=max_physics_replay_size // device_count,
       dummy_data_sample=dummy_transition,
-      sample_batch_size=agent_batch_size * grad_updates_per_model_step // device_count,
+      sample_batch_size=agent_batch_size * utd_ratio // device_count,
   )
 
 
@@ -368,7 +394,7 @@ def train(
   replay_buffer_physics_state = ReplayBufferPhysicsState(
       max_replay_size=max_physics_replay_size // device_count,
       dummy_data_sample=dummy_transition,
-      sample_batch_size=model_batch_size * grad_updates_per_model_step // device_count,
+      sample_batch_size=model_batch_size * utd_ratio // device_count,
   )
   
   # initialize model trainer
@@ -662,10 +688,27 @@ def train(
             action=actions,
             reward=nstate.reward,
             discount=1 - nstate.done,
-            next_observation=nstate.obs,
+            # The obs actually reached, NOT the post-autoreset obs: truncated
+            # (info-cutoff) transitions are bootstrapped by the critic, so
+            # next_observation must be the state the rollout was cut off at.
+            next_observation=nstate.info['pre_reset_obs'],
             extras={'policy_extras': policy_extras, 'state_extras': state_extras},
         )
 
+
+  def _pre_reset_view(state: State) -> State:
+    """View of `state` with the true post-step obs and env-owned info restored.
+
+    The auto-reset wrappers revert obs and the env-declared `reset_carry_keys`
+    to their episode-start values on `done`, but stash the actually-reached
+    values under `pre_reset_*`. Transitions must be built from this view so
+    that next_observation (bootstrapped on truncation) and the physics pairs
+    used for model training are real transitions, never reset teleports.
+    """
+    info = dict(state.info)
+    for k in environment.reset_carry_keys:
+      info[k] = state.info[f'pre_reset_{k}']
+    return state.replace(obs=state.info['pre_reset_obs'], info=info)
 
   def actor_step(
     env: Env,
@@ -677,15 +720,16 @@ def train(
         """Carries out one step using the policy in the real environment"""
         actions, policy_extras = policy(env_state.obs, key)
         nstate = env.step(env_state, actions)
+        nstate_pre_reset = _pre_reset_view(nstate)
         state_extras = {x: nstate.info[x] for x in extra_fields}
         return nstate, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
             observation=env_state.obs,
             action=actions,
             reward=nstate.reward,
             discount=1 - nstate.done,
-            next_observation=nstate.obs,
+            next_observation=nstate_pre_reset.obs,
             extras={'policy_extras': policy_extras, 'state_extras': state_extras},
-        ), environment.extract_physics_transition(env_state, nstate, policy_extras)
+        ), environment.extract_physics_transition(env_state, nstate_pre_reset, policy_extras)
 
   def random_actor_step(
     env: Env,
@@ -698,15 +742,16 @@ def train(
         actions = jax.random.uniform(key, (env_state.obs.shape[0], model_action_size), minval=-1.0, maxval=1.0)
         policy_extras = {}
         nstate = env.step(env_state, actions)
+        nstate_pre_reset = _pre_reset_view(nstate)
         state_extras = {x: nstate.info[x] for x in extra_fields}
         return nstate, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
             observation=env_state.obs,
             action=actions,
             reward=nstate.reward,
             discount=1 - nstate.done,
-            next_observation=nstate.obs,
+            next_observation=nstate_pre_reset.obs,
             extras={'policy_extras': policy_extras, 'state_extras': state_extras},
-        ), environment.extract_physics_transition(env_state, nstate, policy_extras)
+        ), environment.extract_physics_transition(env_state, nstate_pre_reset, policy_extras)
 
   def get_experience(
       normalizer_params: running_statistics.RunningStatisticsState,
@@ -859,41 +904,20 @@ def train(
         model_transitions.observation,
     )
 
+    if kept_transitions_per_step < num_envs:
+      # Insert only a random subset of this step's transitions. The fold_in key
+      # keeps the actor-step RNG stream identical to model_subsampling=1.0.
+      subsample_idx = jax.random.choice(
+          jax.random.fold_in(key, 1),
+          num_envs,
+          shape=(kept_transitions_per_step,),
+          replace=False,
+      )
+      model_transitions = jax.tree_util.tree_map(
+          lambda x: x[subsample_idx], model_transitions
+      )
     model_buffer_state = model_replay_buffer.insert(model_buffer_state, model_transitions)
     return normalizer_params, model_env_state, model_buffer_state
-  
-  def fill_model_replay_buffer(
-      training_state: TrainingState,
-      model_env_state: envs.State,
-      model_buffer_state: ReplayBufferState,
-      key: PRNGKey,
-  ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
-    """Pre-fill the model replay buffer with synthetic rollouts before agent training."""
-
-    def f(carry, unused):
-      del unused
-      training_state, model_env_state, model_buffer_state, key = carry
-      key, new_key = jax.random.split(key)
-      new_normalizer_params, model_env_state, model_buffer_state, = get_model_based_experience(
-          training_state.normalizer_params,
-          training_state.policy_params,
-          model_env_state,
-          model_buffer_state,
-          key,
-      )
-      new_training_state = training_state.replace(
-          normalizer_params=new_normalizer_params,
-      )
-      return (new_training_state, model_env_state, model_buffer_state, new_key), ()
-
-    return jax.lax.scan(
-        f,
-        (training_state, model_env_state, model_buffer_state, key),
-        (),
-        length=num_prefill_actor_steps,
-    )[0]
-
-  fill_model_replay_buffer = jax.jit(fill_model_replay_buffer)
 
   def agent_sgd_step(
       carry: Tuple[TrainingState, PRNGKey], transitions: Transition
@@ -989,13 +1013,13 @@ def train(
       ReplayBufferState,
       Metrics,
   ]:
-    """Collect one batch of model rollouts and perform `grad_updates_per_model_step` SAC updates."""
+    """Collect one batch of model rollouts and perform `utd_ratio` SAC updates."""
     experience_key, training_key = jax.random.split(key)
 
     # Extract model params from the env state before the scan so they are
     # captured as a closure constant rather than carried as mutable loop state.
     # This prevents XLA from including ~34 MB of params in the scan carry for
-    # every one of the num_training_steps_per_model_train iterations.
+    # every one of the model_steps_per_epoch iterations.
     _model_params = model_env_state.info['model']
     _lean_info = {k: v for k, v in model_env_state.info.items() if k != 'model'}
     _lean_env_state = model_env_state.replace(info=_lean_info)
@@ -1023,7 +1047,7 @@ def train(
         f,
         (training_state.normalizer_params, training_state.policy_params, _lean_env_state, model_buffer_state, experience_key),
         (),
-        length=num_training_steps_per_model_train,
+        length=model_steps_per_epoch,
     )
     # Reattach model params so the returned state matches the caller's expectation.
     final_info = dict(_lean_env_state.info)
@@ -1032,14 +1056,14 @@ def train(
     
     training_state = training_state.replace(
         normalizer_params=normalizer_params,
-        env_steps=training_state.env_steps + grad_updates_per_model_step,
+        env_steps=training_state.env_steps + utd_ratio,
     )
 
     model_buffer_state, transitions = model_replay_buffer.sample(model_buffer_state)
     # Change the front dimension of transitions so 'update_step' is called
     # grad_updates_per_step times by the scan.
     transitions = jax.tree_util.tree_map(
-        lambda x: jnp.reshape(x, (grad_updates_per_model_step*num_training_steps_per_model_train, -1) + x.shape[1:]),
+        lambda x: jnp.reshape(x, (utd_ratio*model_steps_per_epoch, -1) + x.shape[1:]),
         transitions,
     )
     (training_state, _), metrics = jax.lax.scan(
@@ -1067,7 +1091,7 @@ def train(
     #     f,
     #     (training_state, model_env_state, model_buffer_state, key),
     #     (),
-    #     length=num_training_steps_per_model_train,
+    #     length=model_steps_per_epoch,
     # )
     training_state, model_env_state, model_buffer_state, metrics = agent_training_step(training_state, model_env_state, model_buffer_state, key)
     metrics = jax.tree_util.tree_map(jnp.mean, metrics)
@@ -1158,7 +1182,7 @@ def train(
     epoch_training_time = time.time() - t
     training_walltime += epoch_training_time
     sps = (
-        env_steps_per_actor_step * num_training_steps_per_model_train
+        env_steps_per_actor_step * model_steps_per_epoch
     ) / epoch_training_time
     metrics = {
         'training/sps': sps,
@@ -1204,7 +1228,7 @@ def train(
         model_obs_std=model_obs_std,
         next_state_delta_mean=next_state_delta_mean,
         next_state_delta_std=next_state_delta_std,
-        initial_log_alpha=float(jnp.log(alpha)) if not tune_entropy else 0.0,
+        initial_log_alpha=float(jnp.log(alpha)),
   )
 
   _initial_policy_params = training_state.policy_params
@@ -1250,7 +1274,7 @@ def train(
 
 # train, and collect data num_trial times
   num_steps = 0
-  num_real_transitions = min_physics_replay_size
+  num_real_transitions = real_steps_per_trial
   for iteration in range(num_trials):
         # model training
         t0 = time.time()
@@ -1315,13 +1339,13 @@ def train(
         # sample initial states
         logging.info('Starting Agent training...')
         curr_env_key, local_key = jax.random.split(local_key)
-        env_keys = jax.random.split(curr_env_key, num_envs * num_resampling_epochs)
+        env_keys = jax.random.split(curr_env_key, num_envs * epochs_per_trial)
         env_keys = jnp.reshape(
-            env_keys, (num_resampling_epochs, num_envs) + env_keys.shape[1:]
+            env_keys, (epochs_per_trial, num_envs) + env_keys.shape[1:]
         )
         init_model_env_states = model_env_reset(env_keys, physics_buffer_state)
         info = init_model_env_states.info
-        info['model'] = tree_repeat(_unpmap(training_state.model_state.params), num_resampling_epochs)
+        info['model'] = tree_repeat(_unpmap(training_state.model_state.params), epochs_per_trial)
         scalar_fields = {
             'model_obs_mean':       training_state.model_obs_mean,
             'model_obs_std':        training_state.model_obs_std,
@@ -1332,7 +1356,7 @@ def train(
             'binning_entropy':      binning_entropy,
         }
         repeated = jax.tree_util.tree_map(
-            lambda x: jnp.repeat(x[None], num_resampling_epochs, axis=0), scalar_fields
+            lambda x: jnp.repeat(x[None], epochs_per_trial, axis=0), scalar_fields
         )
         info.update(repeated)
         info['rng'] = env_keys
@@ -1377,7 +1401,7 @@ def train(
         logging.info('Eval Episode Reward: %s', metrics['eval/episode_reward'])
         logging.info('Eval Episode Reward Std: %s', metrics['eval/episode_reward_std'])
         logging.info('Eval Avg Episode Length: %s', metrics['eval/avg_episode_length'])
-        num_steps += num_resampling_epochs * grad_updates_per_model_step * num_training_steps_per_model_train
+        num_steps += epochs_per_trial * utd_ratio * model_steps_per_epoch
         metrics['num_real_transitions'] = num_real_transitions
         progress_fn(num_steps, metrics)
 
@@ -1414,5 +1438,5 @@ def train(
         logging.info('physics replay size: %s', replay_size)
         t1 = time.time()
         logging.info('Full iteration (model + agent + real data collection) took: %s seconds', t1 - t0)
-        num_real_transitions += min_physics_replay_size
+        num_real_transitions += real_steps_per_trial
   return (make_policy, params, metrics)

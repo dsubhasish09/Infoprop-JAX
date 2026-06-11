@@ -1,27 +1,35 @@
 name: "infoprop"
 
-num_timesteps: 10000000
 episode_length: 2000
 
-# buffer config
-max_physics_replay_size: 100000
-min_physics_replay_size: 10000
-max_model_replay_size: 10000000
-min_model_replay_size: 0
+# --- data collection (real system) ---
+num_trials: 10                  # outer loop: collect -> train model -> train agent
+real_steps_per_trial: 10000     # real transitions collected each trial
+num_real_train_envs: 5
+physics_buffer_size: null     # optional; defaults to num_trials * real_steps_per_trial
 
-# agent training config
+# --- model rollouts (synthetic data) ---
+num_model_envs: 10000
+model_steps_per_epoch: 1000     # model env steps per agent-training epoch
+epochs_per_trial: 10            # env re-inits from real states per trial
+model_subsampling: 0.1          # fraction of each step's transitions kept in the buffer, (0, 1]
+keep_past_epoch: True           # buffer holds the whole trial (True) or one epoch (False);
+                                # size is derived: (epochs|1) * steps * round(frac * envs)
+
+# --- agent training ---
 agent_learning_rate: 0.0003
 agent_batch_size: 1024
 agent_hidden_layer_sizes: [256, 256]
-agent_layer_norm: False
 policy_network_layer_norm: False
-q_network_layer_norm: False
-grad_updates_per_model_step: 10
-num_training_steps_per_model_train: 1000
-num_resampling_epochs: 10
+# Layer norm on the critic prevents unbounded Q-value growth (bootstrapped
+# overestimation), which otherwise diverges on high-dimensional action spaces
+# such as the humanoid (see envs/humanoid/diagnose_sac_training.py).
+q_network_layer_norm: True
+utd_ratio: 10                   # SAC grad updates per model env step
 target_entropy: -1.0
 tau: 0.005
 tune_entropy: True
+# Entropy temperature: fixed value when tune_entropy=False, initial value when True.
 alpha: 0.1
 reset_agent_per_trial: False
 reset_model_replay_buffer: True
@@ -37,16 +45,13 @@ patience: 10            # model early stopping: epochs without val-loss improvem
 min_log_var: -10
 max_log_var: 0.5
 
-# rollout config
-num_model_envs: 1000
+# rollout cutoffs
 max_rollout_length: 1000
 lower_quantile: 0.01    # quantile of real-data entropy → λ₂ (accumulated cutoff)
 upper_quantile: 1.0     # quantile of real-data entropy → λ₁ (per-step cutoff)
 action_repeat: 1
 
 # miscellaneous
-num_real_train_envs: 5
 num_real_eval_envs: 1000
 discounting: 0.999
-num_trials: 20
 normalize_observations: True

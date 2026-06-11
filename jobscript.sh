@@ -22,7 +22,8 @@ export MUJOCO_GL=egl
 # causing OOM on large replay buffers.
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
+# Only deviations from the defaults (algorithm/infoprop.yaml + env/wheelbot.yaml)
+# are listed: the 10k-envs / 0.1-subsampling experiment with fixed entropy.
 python -m infoprop_jax.main \
-    algorithm=infoprop \
     experiment=new_general_test \
-    seed=0
+    seed=$RANDOM

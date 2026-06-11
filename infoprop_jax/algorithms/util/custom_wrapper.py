@@ -14,6 +14,12 @@ The model-rollout stack wraps an ``InfopropEnv`` (built via ``wrap_custom``):
     ``done`` (driven by the env's ``reset_carry_keys``), and tracks rollout-length counters.
 
 The real env is wrapped with ``wrap`` (standard Vmap/Episode + ``CustomAutoResetWrapper2``).
+
+Both auto-reset wrappers stash the *actually reached* post-step values before reverting:
+``pre_reset_obs`` (and, for the real env, ``pre_reset_<carry_key>``). Transition builders
+must read these for next-state fields — ``obs``/carry keys are already reverted to the
+episode start on ``done``, which would otherwise corrupt bootstrapped SAC targets on
+truncation and inject reset "teleports" into the model-training data.
 """
 from typing import Callable, Dict, Optional, Tuple
 
@@ -225,6 +231,10 @@ class CustomAutoResetWrapper(Wrapper):
         state.info['first_obs'] = state.obs
         for k in self._carry_keys:
             state.info[f'first_{k}'] = state.info[k]
+        # The observation actually reached this step, before any auto-reset revert.
+        # Consumers that bootstrap on truncation (SAC critic) must use this as
+        # next_observation, since `obs` is reverted to the episode start on done.
+        state.info['pre_reset_obs'] = state.obs
         state.info['num_inits'] = 0
         state.info['total_done_steps'] = 0
         return state
@@ -255,6 +265,8 @@ class CustomAutoResetWrapper(Wrapper):
         reset = jax.tree.map(where_done, first, current)
 
         info = state.info
+        # Preserve the true post-step observation before reverting on done.
+        info['pre_reset_obs'] = state.obs
         for k in self._carry_keys:
             info[k] = reset[k]
         info['num_inits'] = info['num_inits'] + jp.sum(state.done)
@@ -277,6 +289,13 @@ class CustomAutoResetWrapper2(Wrapper):
         state.info['first_obs'] = state.obs
         for k in self.env.reset_carry_keys:
             state.info[f'first_{k}'] = state.info[k]
+        # The values actually reached this step, before any auto-reset revert.
+        # Consumers of the *next* state (physics transitions for model training,
+        # bootstrapped SAC targets) must read these, since obs and the env-owned
+        # carry keys are reverted to the episode start on done.
+        state.info['pre_reset_obs'] = state.obs
+        for k in self.env.reset_carry_keys:
+            state.info[f'pre_reset_{k}'] = state.info[k]
         return state
 
     def step(self, state: State, action: jax.Array) -> State:
@@ -306,5 +325,9 @@ class CustomAutoResetWrapper2(Wrapper):
         curr_info = {k: state.info[k] for k in carry_keys}
         curr_info['steps'] = state.info['steps']
         info = state.info
+        # Preserve the true post-step values before reverting on done.
+        info['pre_reset_obs'] = state.obs
+        for k in carry_keys:
+            info[f'pre_reset_{k}'] = state.info[k]
         info.update(jax.tree.map(where_done, first_info, curr_info))
         return state.replace(pipeline_state=pipeline_state, obs=obs, info=info)

@@ -3,8 +3,8 @@
 
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
-#SBATCH --job-name=humanoid_infoprop
-#SBATCH --output=humanoid_%A_%a.out
+#SBATCH --job-name=humanoid_race_infoprop
+#SBATCH --output=humanoid_race_%A_%a.out
 #SBATCH --account=rwth2087
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:35:00
@@ -22,11 +22,9 @@ export MUJOCO_GL=egl
 # causing OOM on large replay buffers.
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-# Humanoid-forced algorithm values (target_entropy, discounting, upper_quantile)
-# come from env/humanoid.yaml; only experiment one-offs are listed here.
+# Race-forced algorithm values (target_entropy, discounting, upper_quantile)
+# come from env/humanoid_race.yaml; only experiment one-offs are listed here.
 python -m infoprop_jax.main \
-    env=humanoid \
-    experiment=humanoid_infoprop \
-    seed=0 \
-    env.reward_scale=1 \
-    algorithm.num_trials=30
+    env=humanoid_race \
+    experiment=humanoid_race_infoprop \
+    seed=$RANDOM \

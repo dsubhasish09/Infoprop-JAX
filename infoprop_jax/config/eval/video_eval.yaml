@@ -1,6 +1,6 @@
 log_dir: ???         # Required: path to Hydra training output dir, e.g. exp/test/27752/2026.05.05/135429
 iteration: 5      # Which checkpoint to load; null = latest brax_policy_* found
-track_seed: 21       # Track to evaluate on
+track_seed: 21       # Track to evaluate on (wheelbot only; ignored for humanoid)
 output_dir: null     # Output directory; null = <log_dir>/video_eval/iter_<N>/
 no_model: false      # Skip model rollout (e.g. if no model_state checkpoint exists)
 max_steps: 10000      # Max steps for real rollout

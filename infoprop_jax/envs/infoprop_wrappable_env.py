@@ -1,9 +1,17 @@
 """InfopropWrappable: the contract a real MJX env must satisfy to be Infoprop-wrappable.
 
-A concrete environment subclasses this, implements the usual Brax `PipelineEnv`
-methods (`reset`, `step`, observation, reward) with its *real* physics, and additionally
-implements the Infoprop hooks below. It can then be turned into a learned-dynamics model
-environment by wrapping it:
+`InfopropWrappable` is a pure mixin (no Brax base class): it only declares the Infoprop
+hooks plus shared history helpers. A host class provides the actual Brax env interface
+(`reset`, `step`, `dt`, `action_size`, `observation_size`) in one of two ways:
+
+  * a hand-written env subclasses both: ``class MyEnv(PipelineEnv, InfopropWrappable)``,
+    implementing its *real* physics on the `PipelineEnv` side and the hooks below;
+  * an adapter around an existing stock Brax env subclasses
+    ``(brax.envs.base.Wrapper, InfopropWrappable)`` — see
+    `DefaultInfopropWrappable` in default_wrappable.py for the ready-made simple case
+    (model state == observation, no context).
+
+Either way the result can be turned into a learned-dynamics model environment:
 
     model_env = InfopropEnv(MyEnv(cfg), min_log_var=..., max_log_var=...)
 
@@ -25,7 +33,9 @@ State vectors:
                                        cutoff space.
 
 Required attributes the subclass sets in __init__: `model_state_size`, `context_size`,
-`full_state_size`, `obs_history`, `act_history`. (`dt` / `action_size` come from PipelineEnv.)
+`full_state_size`, `obs_history`, `act_history`. (`dt` / `action_size` /
+`observation_size` are host-class obligations: provided by `PipelineEnv`, or forwarded
+to the inner env by `brax.envs.base.Wrapper`.)
 
 Fast model rollouts (skipping the MJX `pipeline_state` during model rollouts) are an
 optional, purely env-side optimisation: the framework and wrappers are agnostic to it and
@@ -42,17 +52,18 @@ from typing import Dict, List, Tuple
 
 import jax
 from jax import numpy as jp
-from brax.envs.base import PipelineEnv, State
+from brax.envs.base import State
 from brax.training.types import Transition
 
 
-class InfopropWrappable(PipelineEnv):
-  """Base class declaring the env-specific hooks the Infoprop core needs.
+class InfopropWrappable:
+  """Mixin declaring the env-specific hooks the Infoprop core needs.
 
-  Subclasses additionally implement the standard `PipelineEnv` interface (`reset`,
-  `step`) with their real physics. The default `augment_prediction` (identity) plus a
-  `preprocess` that passes the action through make a plain env with `context_size == 0`
-  work with no extra structure.
+  Host classes additionally provide the standard Brax env interface (`reset`, `step`,
+  `dt`, `action_size`, `observation_size`) — by subclassing `PipelineEnv` (real
+  physics) or `brax.envs.base.Wrapper` (adapting an existing env). The default
+  `augment_prediction` (identity) plus a `preprocess` that passes the action through
+  make a plain env with `context_size == 0` work with no extra structure.
   """
 
   # ----------------------------------------------------------------- required hooks
@@ -101,15 +112,6 @@ class InfopropWrappable(PipelineEnv):
     ``pipeline_state`` is the env's own choice — but it must match the structure
     ``postprocess`` produces (consistent ``pipeline_state`` present/absent under scan).
     """
-    raise NotImplementedError
-
-  def _get_obs(self, *args, **kwargs) -> jp.ndarray:
-    raise NotImplementedError
-
-  def _get_rew(
-      self, state: State, action: jp.ndarray
-  ) -> Tuple[jp.ndarray, jp.ndarray, Dict[str, jp.ndarray]]:
-    """Compute the step reward. Returns ``(reward, done, reward_metrics)``."""
     raise NotImplementedError
 
   # ------------------------------------------------------------- optional hooks

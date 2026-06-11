@@ -125,21 +125,28 @@ def main(cfg: omegaconf.DictConfig):
     train_fn = functools.partial(
         train_fn,
         episode_length=train_cfg.episode_length,
-        max_physics_replay_size=train_cfg.max_physics_replay_size,
-        min_physics_replay_size=train_cfg.min_physics_replay_size,
-        max_model_replay_size=train_cfg.max_model_replay_size,
-        min_model_replay_size=train_cfg.min_model_replay_size,
+        # New-style keys with fallbacks to the pre-rename names so configs
+        # logged by old runs (wandb / hydra output dirs) stay replayable.
+        real_steps_per_trial=train_cfg.get(
+            'real_steps_per_trial', train_cfg.get('min_physics_replay_size')),
+        physics_buffer_size=train_cfg.get(
+            'physics_buffer_size', train_cfg.get('max_physics_replay_size')),
         agent_learning_rate=train_cfg.agent_learning_rate,
         agent_batch_size=train_cfg.agent_batch_size,
         agent_hidden_layer_sizes=train_cfg.agent_hidden_layer_sizes,
-        agent_layer_norm=train_cfg.agent_layer_norm,
         policy_network_layer_norm=train_cfg.get(
-            'policy_network_layer_norm', train_cfg.agent_layer_norm),
+            'policy_network_layer_norm', train_cfg.get('agent_layer_norm', False)),
         q_network_layer_norm=train_cfg.get(
-            'q_network_layer_norm', train_cfg.agent_layer_norm),
-        grad_updates_per_model_step=train_cfg.grad_updates_per_model_step,
-        num_resampling_epochs=train_cfg.num_resampling_epochs,
-        num_training_steps_per_model_train=train_cfg.num_training_steps_per_model_train,
+            'q_network_layer_norm', train_cfg.get('agent_layer_norm', False)),
+        utd_ratio=train_cfg.get(
+            'utd_ratio', train_cfg.get('grad_updates_per_model_step')),
+        epochs_per_trial=train_cfg.get(
+            'epochs_per_trial', train_cfg.get('num_resampling_epochs')),
+        model_steps_per_epoch=train_cfg.get(
+            'model_steps_per_epoch',
+            train_cfg.get('num_training_steps_per_model_train')),
+        model_subsampling=train_cfg.get('model_subsampling', 1.0),
+        keep_past_epoch=train_cfg.get('keep_past_epoch', True),
         model_learning_rate=train_cfg.model_learning_rate,
         model_weight_decay=train_cfg.model_weight_decay,
         model_batch_size=train_cfg.model_batch_size,
@@ -152,8 +159,6 @@ def main(cfg: omegaconf.DictConfig):
         lower_quantile=train_cfg.lower_quantile,
         upper_quantile=train_cfg.upper_quantile,
         action_repeat=train_cfg.action_repeat,
-        obs_history=cfg.env.get('obs_history', 1),
-        act_history=cfg.env.get('act_history', 0),
         num_real_envs=train_cfg.num_real_train_envs,
         num_real_eval_envs=train_cfg.num_real_eval_envs,
         discounting=train_cfg.discounting,
