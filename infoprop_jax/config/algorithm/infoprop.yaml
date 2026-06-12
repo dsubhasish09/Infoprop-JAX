@@ -49,7 +49,7 @@ max_log_var: 0.5
 # rollout cutoffs
 max_rollout_length: 1000
 lower_quantile: 0.01    # quantile of real-data entropy → λ₂ (accumulated cutoff)
-upper_quantile: 1.0     # quantile of real-data entropy → λ₁ (per-step cutoff)
+upper_quantile: 0.99     # quantile of real-data entropy → λ₁ (per-step cutoff)
 action_repeat: 1
 
 # --- correlated exploration noise (full docs: config/README.md) ---
