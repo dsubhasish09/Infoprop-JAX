@@ -148,7 +148,7 @@ infoprop-jax/
 │   │   ├── video_eval.py                # Render real vs. model rollouts for a checkpoint
 │   │   ├── video_eval_humanoid.py       # Humanoid/humanoid-race rendering variant
 │   │   └── eval_utils.py                # Shared checkpoint-evaluation helpers
-│   └── config/                          # Hydra configs; all keys documented in config/README.md
+│   └── config/                          # Hydra configs (main / algorithm / env / eval)
 ├── jobscript*.sh                        # SLURM launch scripts (train / video eval)
 ├── pyproject.toml                       # Direct dependencies
 └── uv.lock                              # Resolved lockfile
@@ -202,10 +202,6 @@ Override config on the CLI:
 python -m infoprop_jax.main experiment=my_run \
     algorithm.num_model_envs=1000 algorithm.max_rollout_length=1000
 ```
-
-Every configuration key (training loop, SAC, model ensemble, rollout cutoffs, correlated
-exploration noise, video eval) is documented in the configuration reference,
-[`infoprop_jax/config/README.md`](infoprop_jax/config/README.md).
 
 Select the environment with `env=` (default: `wheelbot`, per `config/main.yaml`):
 ```bash

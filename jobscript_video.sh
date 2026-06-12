@@ -21,4 +21,4 @@ module load FFmpeg
 
 export MUJOCO_GL=egl
 
-python -m infoprop_jax.main video_eval=true eval.log_dir=exp/humanoid_race_infoprop/0/2026.06.11/021836 eval.iteration=19 eval.track_seed=100
+python -m infoprop_jax.main video_eval=true eval.log_dir=exp/ant_infoprop/21922/2026.06.12/174816
