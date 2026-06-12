@@ -8,12 +8,12 @@ learned-dynamics model environment, replacing physics with a probabilistic ensem
     model_env = InfopropEnv(MyEnv(cfg), min_log_var=..., max_log_var=...)
 
 It owns the *fixed* Infoprop core math (decode, ensemble fusion + Kalman update, conditional
-entropy, sampling, rollout-termination cutoffs, ensemble-trainer wiring) and delegates every
-env-specific concern to the wrapped env's hooks (`preprocess`, `augment_prediction`,
+entropy, sampling, rollout-termination cutoffs, ensemble-trainer setup) and delegates every
+env-specific concern to the wrapped env's methods (`preprocess`, `augment_prediction`,
 `postprocess`). The whole per-sample step lives in ``_single_step``; ``batched_step`` vmaps it
-over the rollout batch. Because it is a `Wrapper`, the underlying env's interface (`dt`,
-`action_size`, `observation_size`, sizes, the data contract) is forwarded automatically, and
-`InfopropEnv` composes uniformly with the Infoprop training wrappers in
+over the rollout batch. Because it is a `Wrapper`, the underlying env's attributes (`dt`,
+`action_size`, `observation_size`, sizes, the buffer-layout declarations) are passed through
+automatically, and `InfopropEnv` stacks uniformly with the Infoprop training wrappers in
 `algorithms/util/custom_wrapper.py`.
 
 The learned-model state — the apply function, the ensemble params carried in `info`, and the
@@ -119,7 +119,7 @@ class InfopropEnv(Wrapper):
     next_model_state = next_full[:self.model_state_size]
     next_context = next_full[self.model_state_size:]
 
-    # framework-owned: advance rng + accumulate entropy
+    # managed here by the model env: advance rng + accumulate entropy
     info = dict(state.info)
     info['rng'] = rng
     info['accumulated_conditional_entropy'] = (
@@ -127,7 +127,7 @@ class InfopropEnv(Wrapper):
     info['current_conditional_entropy'] = conditional_entropy
     state = state.replace(info=info)
 
-    # env-owned: rebuild the State + reward (action-prep already done in preprocess)
+    # delegated to the env: rebuild the State + reward (action-prep already done in preprocess)
     state = self.env.postprocess(
         state, applied_action, next_model_state, next_context, processed_action)
 

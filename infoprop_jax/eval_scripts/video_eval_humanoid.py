@@ -259,7 +259,7 @@ def run_loaded(eval_cfg, log_dir, env_cfg, algo_cfg):
                                       track_seed=eval_cfg.track_seed)
         else:
             wrapped = HumanoidEnv(cfg=env_cfg)
-        # fast_model_rollout is env-owned: disable it so model rollouts build
+        # fast_model_rollout belongs to the env: disable it so model rollouts build
         # the MJX pipeline_state needed for rendering.
         wrapped.fast_model_rollout = False
         env_model = InfopropEnv(

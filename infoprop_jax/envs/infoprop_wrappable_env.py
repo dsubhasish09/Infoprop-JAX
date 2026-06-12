@@ -100,7 +100,7 @@ class InfopropWrappable:
     optimisation): set ``pipeline_state=None`` to skip it. Whatever you choose, the
     State structure must be consistent across ``postprocess`` and
     ``reset_from_buffer`` (they are carried together under ``scan``). A common
-    pattern is to gate it on an env-owned ``self.fast_model_rollout`` flag.
+    pattern is to gate it on a ``self.fast_model_rollout`` flag of your env.
     """
     raise NotImplementedError
 
@@ -147,7 +147,7 @@ class InfopropWrappable:
     """Return the context vector for a physics-buffer transition.
 
     The default supports the common ``context_size == 0`` case. Environments that
-    use context should override this to read their env-owned fields from
+    use context should override this to read their own fields from
     ``transition.extras['state_extras']``.
     """
     return jp.zeros((self.context_size,))

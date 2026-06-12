@@ -9,7 +9,7 @@ To add a new environment:
   2. Add a ``name -> class`` entry to ``ENV_REGISTRY`` below.
 
 Stock Brax envs need no porting: subclass ``DefaultInfopropWrappable`` with an
-obs-based reward function (see ``quadruped/ant.py`` for the worked example) and
+obs-based reward function (see ``quadruped/ant.py`` for the example) and
 register the class below.
 
 Nothing else needs to change: importing ``infoprop_jax.envs`` (which the training

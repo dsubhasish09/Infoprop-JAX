@@ -50,7 +50,7 @@ from infoprop_jax.envs.wheelbot.utils import compute_line_element
 class HumanoidRaceEnv(HumanoidEnv):
     """Humanoid MJX racing task: drive the scaled Wheelbot tracks.
 
-    Inherits the humanoid physics-state representation and all Infoprop hooks that
+    Inherits the humanoid physics-state representation and all Infoprop methods that
     are track-agnostic (preprocess, augment_prediction, ...); overrides observation,
     reward and the reset protocol to mirror the Wheelbot racing env.
     """
@@ -102,7 +102,7 @@ class HumanoidRaceEnv(HumanoidEnv):
         _enc = self.sin_cos_encoding
         self._obs_slice_start = (3 if _enc else 2) * self.lookahead + (3 if _enc else 2)
 
-    # ---------------------------------------------------- physics-buffer contract
+    # ------------------------------------------------------ physics-buffer layout
     @property
     def dummy_physics_transition(self) -> Transition:
         ms, oh, ah = self.model_state_size, self.obs_history, self.act_history
@@ -360,7 +360,7 @@ class HumanoidRaceEnv(HumanoidEnv):
         info["reward_metrics"] = reward_metrics
         return state.replace(reward=reward, done=done, info=info)
 
-    # ------------------------------------------------------------- Infoprop hooks
+    # ----------------------------------------------------------- Infoprop methods
     def postprocess(
         self,
         state,

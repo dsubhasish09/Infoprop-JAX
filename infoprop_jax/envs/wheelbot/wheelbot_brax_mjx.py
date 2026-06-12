@@ -3,10 +3,10 @@ Wheelbot environment using MuJoCo/MJX physics — the example `InfopropWrappable
 
 `WheelbotEnv` plays two roles with one observation/reward/state layout:
   - the ground-truth env (its real `step`) for collecting training data and final evaluation, and
-  - the env wrapped by `InfopropEnv` for imagined model rollouts, via the Infoprop hooks
+  - the env wrapped by `InfopropEnv` for imagined model rollouts, via the Infoprop methods
     (`preprocess` / `augment_prediction` / `postprocess` / `reset_from_buffer`).
 
-See infoprop_jax/envs/README.md for the contract and infoprop_jax/envs/wheelbot/README.md for the
+See infoprop_jax/envs/README.md for what an env must define and infoprop_jax/envs/wheelbot/README.md for the
 Wheelbot state/observation/reward details.
 
 Robot dynamics summary:
@@ -204,12 +204,12 @@ trajectories_flattened = jp.array([pad_line_segments_to_size(t, max_length) for 
 
 
 class WheelbotEnv(PipelineEnv, InfopropWrappable):
-    """Wheelbot MJX env: real MuJoCo-MJX physics + the Infoprop hooks.
+    """Wheelbot MJX env: real MuJoCo-MJX physics + the Infoprop methods.
 
     As an ``InfopropWrappable`` it is both the ground-truth data-collection / eval env
     (via its real ``step``) and the env that ``InfopropEnv`` wraps for learned-dynamics
     rollouts (via ``preprocess`` / ``augment_prediction`` / ``postprocess``). The
-    ``preprocess`` hook also applies the balancing prior. The two roles share one
+    ``preprocess`` method also applies the balancing prior. The two roles share one
     observation, reward and state layout.
 
     Attributes (beyond base PipelineEnv):
@@ -312,8 +312,8 @@ class WheelbotEnv(PipelineEnv, InfopropWrappable):
         # History parameters for model learning.
         self.obs_history = cfg.get('obs_history', 1)
         self.act_history = cfg.get('act_history', 0)
-        # Env-owned fast-rollout flag: skip building the MJX pipeline_state during
-        # model rollouts. The framework is agnostic to this; see InfopropWrappable.
+        # Fast-rollout flag (this env's own choice): skip building the MJX pipeline_state
+        # during model rollouts. The training code is agnostic to this; see InfopropWrappable.
         self.fast_model_rollout = cfg.get('fast_model_rollout', True)
         self.lookahead = cfg.get('lookahead', 10)
         self.sin_cos_encoding = cfg.get('sin_cos_encoding', False)
@@ -328,7 +328,7 @@ class WheelbotEnv(PipelineEnv, InfopropWrappable):
         self.context_size = 5
         self.full_state_size = self.model_state_size + self.context_size
 
-    # ---------------------------------------------------- physics-buffer data contract
+    # ------------------------------------------------------ physics-buffer layout
     @property
     def dummy_physics_transition(self) -> Transition:
         """Zero-filled transition that sizes the physics replay buffer and declares the
@@ -372,7 +372,7 @@ class WheelbotEnv(PipelineEnv, InfopropWrappable):
 
     @property
     def reset_carry_keys(self):
-        """Env-owned dynamic info keys the real-env auto-reset wrapper reverts on `done`."""
+        """This env's dynamic info keys that the real-env auto-reset wrapper restores on `done`."""
         return ['physics_state', 'invariant_physics_state', 'applied_torque']
 
     def _get_obs(self, data: mjx.Data, action: jp.ndarray, track_seed: int) -> jp.ndarray:
@@ -715,7 +715,7 @@ class WheelbotEnv(PipelineEnv, InfopropWrappable):
 
         return state.replace(reward=reward, done=done, info=info)
 
-    # ============================================================ Infoprop hooks
+    # ========================================================== Infoprop methods
     def preprocess(self, state: State, action: jp.ndarray):
         """Build the NN inputs and the applied torque from the State + RL action.
 
@@ -795,9 +795,9 @@ class WheelbotEnv(PipelineEnv, InfopropWrappable):
 
     def postprocess(self, state, applied_action, next_model_state, next_context,
                     processed_action):
-        """Rebuild the MJX-shaped State, env-owned `info`, and reward from a prediction.
+        """Rebuild the MJX-shaped State, this env's `info` keys, and reward from a prediction.
 
-        The framework-owned rng + entropy accumulation are already set on ``state``.
+        The rng + entropy-accumulation keys managed by the training code are already set on ``state``.
         Skips building the MJX pipeline_state when ``self.fast_model_rollout``.
         """
         track_seed = state.info['track_seed']

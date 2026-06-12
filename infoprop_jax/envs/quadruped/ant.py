@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Ant: the stock Brax quadruped adapted via `DefaultInfopropWrappable`.
 
-The example of wrapping a preexisting Brax env without writing any Infoprop hooks:
+The example of wrapping a preexisting Brax env without writing any Infoprop methods:
 model state == observation, no context, and an observation-based reward for imagined
 rollouts (the stock reward reads the physics ``pipeline_state``, which model rollouts
 don't have). Real-env reward and termination come from the stock env unchanged.
