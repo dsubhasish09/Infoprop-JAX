@@ -148,7 +148,7 @@ infoprop-jax/
 │   │   ├── video_eval.py                # Render real vs. model rollouts for a checkpoint
 │   │   ├── video_eval_humanoid.py       # Humanoid/humanoid-race rendering variant
 │   │   └── eval_utils.py                # Shared checkpoint-evaluation helpers
-│   └── config/                          # Hydra configs (main / algorithm / env / eval)
+│   └── config/                          # Hydra configs; all keys documented in config/README.md
 ├── jobscript*.sh                        # SLURM launch scripts (train / video eval)
 ├── pyproject.toml                       # Direct dependencies
 └── uv.lock                              # Resolved lockfile
@@ -203,6 +203,10 @@ python -m infoprop_jax.main experiment=my_run \
     algorithm.num_model_envs=1000 algorithm.max_rollout_length=1000
 ```
 
+Every configuration key (training loop, SAC, model ensemble, rollout cutoffs, correlated
+exploration noise, video eval) is documented in the configuration reference,
+[`infoprop_jax/config/README.md`](infoprop_jax/config/README.md).
+
 Select the environment with `env=` (default: `wheelbot`, per `config/main.yaml`):
 ```bash
 python -m infoprop_jax.main env=humanoid        # also: humanoid_race, ant
@@ -255,7 +259,9 @@ The training schedule in `config/algorithm/infoprop.yaml` is hierarchical - tria
 steps. Each of the `num_trials` outer iterations collects `real_steps_per_trial` real transitions,
 refits the ensemble, and runs `epochs_per_trial` agent-training epochs; every epoch re-initialises
 the model envs from real states and takes `model_steps_per_epoch` model env steps, with `utd_ratio`
-SAC gradient updates per step. `model_subsampling` sets the fraction of each step's transitions
+SAC gradient updates per step. `random_init` controls how the very first dataset (before the first
+model fit) is collected: uniform random actions (`True`, default) or the untrained policy
+(`False`). `model_subsampling` sets the fraction of each step's transitions
 kept in the SAC replay buffer, and `keep_past_epoch` controls whether the buffer holds the whole
 trial or just the current epoch (buffer sizes are derived from these knobs). Network options
 include `policy_network_layer_norm` and `q_network_layer_norm` (critic layer norm prevents

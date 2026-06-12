@@ -232,7 +232,7 @@ def run(eval_cfg):
 
         wrapped = RealWheelbot(cfg=env_cfg, visualize=True,
                                track_seed=eval_cfg.track_seed)
-        # fast_model_rollout is env-owned: disable it so model rollouts build
+        # fast_model_rollout belongs to the env: disable it so model rollouts build
         # the MJX pipeline_state needed for rendering.
         wrapped.fast_model_rollout = False
         env_model = InfopropEnv(

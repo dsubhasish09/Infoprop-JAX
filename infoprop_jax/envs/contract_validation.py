@@ -1,12 +1,12 @@
 # Copyright (c) 2026 Devdutt Subhasish
 # SPDX-License-Identifier: MIT
-"""Startup validation of the `InfopropWrappable` contract.
+"""Startup checks that an env defines the `InfopropWrappable` methods correctly.
 
 `validate_infoprop_contract(env)` is called once at the top of `infoprop.train`.
-Every hook is exercised under `jax.eval_shape`, so MJX reset/step are only traced
+Every required method is called under `jax.eval_shape`, so MJX reset/step are only traced
 (milliseconds, no physics compute) while still yielding exactly the information the
-training loop depends on: output shapes and pytree structures. The scan-critical
-check is #5 — `postprocess` and `reset_from_buffer` must produce structurally
+training loop depends on: output shapes and pytree structures. The check that
+matters most is #5 — `postprocess` and `reset_from_buffer` must produce structurally
 identical `State`s, because they are carried together under `lax.scan`; a mismatch
 there otherwise surfaces as an opaque tracer error deep inside the rollout scan.
 """
@@ -25,7 +25,7 @@ def _specs(tree):
   }
 
 
-def _compare_trees(name_a, tree_a, name_b, tree_b, hook):
+def _compare_trees(name_a, tree_a, name_b, tree_b, method):
   specs_a, specs_b = _specs(tree_a), _specs(tree_b)
   problems = []
   for path in sorted(set(specs_a) | set(specs_b)):
@@ -39,20 +39,20 @@ def _compare_trees(name_a, tree_a, name_b, tree_b, hook):
           f'{specs_b[path][0]} ({name_b})')
   if problems:
     raise ValueError(
-        f'Infoprop contract violation in `{hook}`: {name_a} and {name_b} '
+        f'Infoprop contract violation in `{method}`: {name_a} and {name_b} '
         'must have identical pytree structure and leaf shapes '
         '(they are carried together under scan):\n' + '\n'.join(problems))
 
 
-def _check(condition, hook, message):
+def _check(condition, method, message):
   if not condition:
-    raise ValueError(f'Infoprop contract violation in `{hook}`: {message}')
+    raise ValueError(f'Infoprop contract violation in `{method}`: {message}')
 
 
 def validate_infoprop_contract(env):
-  """Validate the InfopropWrappable hooks of the (unwrapped) real env.
+  """Check the InfopropWrappable methods of the (unwrapped) real env.
 
-  Raises ValueError naming the offending hook and leaf on the first failure.
+  Raises ValueError naming the offending method and leaf on the first failure.
   """
   ms, cs, fs = env.model_state_size, env.context_size, env.full_state_size
   oh, ah = env.obs_history, env.act_history
@@ -100,7 +100,7 @@ def validate_infoprop_contract(env):
          f'obs shape {s0_spec.obs.shape} != (observation_size,) = '
          f'({env.observation_size},)')
 
-  # Zero-filled materialization of the buffer-reset state for the hooks below
+  # Zero-filled materialization of the buffer-reset state for the methods below
   # (None leaves, e.g. a skipped pipeline_state, pass through tree_map untouched).
   s0 = jax.tree_util.tree_map(lambda s: jp.zeros(s.shape, s.dtype), s0_spec)
 

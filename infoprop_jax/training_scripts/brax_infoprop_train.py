@@ -171,6 +171,9 @@ def main(cfg: omegaconf.DictConfig):
         reset_agent_per_trial=train_cfg.reset_agent_per_trial,
         reset_model_replay_buffer=train_cfg.reset_model_replay_buffer,
         reset_model_per_trial=train_cfg.reset_model_per_trial,
+        exploration_noise_config=OmegaConf.to_container(
+            train_cfg.exploration_noise, resolve=True
+        ) if train_cfg.get('exploration_noise') is not None else None,
         agent_dir=os.path.join(output_dir, 'policy'),
         model_dir=os.path.join(output_dir, 'model'),
         seed=cfg.seed,

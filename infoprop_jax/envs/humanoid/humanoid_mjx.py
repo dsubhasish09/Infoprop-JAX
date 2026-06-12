@@ -88,7 +88,7 @@ def _jacobian_w2euler(roll: jp.ndarray, pitch: jp.ndarray) -> jp.ndarray:
 
 
 class HumanoidEnv(PipelineEnv, InfopropWrappable):
-    """Classic Humanoid MJX task plus Infoprop wrapping hooks."""
+    """Classic Humanoid MJX task plus the Infoprop methods."""
 
     def __init__(
         self,
@@ -150,8 +150,8 @@ class HumanoidEnv(PipelineEnv, InfopropWrappable):
         )
         self.obs_history = cfg.get("obs_history", 1)
         self.act_history = cfg.get("act_history", 0)
-        # Env-owned fast-rollout flag: skip building the MJX pipeline_state during
-        # model rollouts. The framework is agnostic to this; see InfopropWrappable.
+        # Fast-rollout flag (this env's own choice): skip building the MJX pipeline_state
+        # during model rollouts. The training code is agnostic to this; see InfopropWrappable.
         self.fast_model_rollout = cfg.get("fast_model_rollout", True)
         # model_state: [z, roll, pitch, yaw_rate, roll_rate, pitch_rate, body_vel(3),
         #               joint_qpos(21), joint_qvel(21)]
@@ -160,7 +160,7 @@ class HumanoidEnv(PipelineEnv, InfopropWrappable):
         self.context_size = 3
         self.full_state_size = self.model_state_size + self.context_size
 
-    # ---------------------------------------------------- physics-buffer contract
+    # ------------------------------------------------------ physics-buffer layout
     @property
     def dummy_physics_transition(self) -> Transition:
         ms, oh, ah = self.model_state_size, self.obs_history, self.act_history
@@ -397,7 +397,7 @@ class HumanoidEnv(PipelineEnv, InfopropWrappable):
         info["reward_metrics"] = reward_metrics
         return state.replace(reward=reward, done=done, info=info)
 
-    # ------------------------------------------------------------- Infoprop hooks
+    # ----------------------------------------------------------- Infoprop methods
     def preprocess(self, state: State, action: jp.ndarray):
         action = jp.clip(action, -1.0, 1.0)
         nn_input = jp.concatenate(

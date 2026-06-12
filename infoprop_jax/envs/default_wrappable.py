@@ -1,9 +1,9 @@
 # Copyright (c) 2026 Devdutt Subhasish
 # SPDX-License-Identifier: MIT
-"""DefaultInfopropWrappable: adapt a stock Brax env to the Infoprop contract.
+"""DefaultInfopropWrappable: make a stock Brax env Infoprop-compatible.
 
-Wraps any existing Brax `PipelineEnv` (ant, humanoid, ...) and implements the whole
-`InfopropWrappable` contract for the simple case:
+Wraps any existing Brax `PipelineEnv` (ant, humanoid, ...) and defines all the
+`InfopropWrappable` methods for the simple case:
 
   * model state == the env's observation (``model_state_size = observation_size``);
   * no context (``context_size == 0``, identity ``augment_prediction``);
@@ -19,9 +19,9 @@ Model rollouts always emit ``pipeline_state=None`` (there is no general inverse 
 from observation to qpos/qvel), so model-env video rendering is not supported; the
 real-env path keeps the inner pipeline state and is unaffected.
 
-Note: the contract hooks are real methods on this class (via the mixin), so they are
-*not* forwarded to the inner env by `Wrapper.__getattr__`. Wrapping an env that itself
-implements the Infoprop contract will silently ignore its hooks — subclass that env
+Note: the Infoprop methods are defined directly on this class, so `Wrapper.__getattr__`
+never falls through to the inner env for them. Wrapping an env that itself defines the
+Infoprop methods will silently ignore that env's versions — subclass that env
 instead of wrapping it here.
 """
 
@@ -85,7 +85,7 @@ class DefaultInfopropWrappable(Wrapper, InfopropWrappable):
     info['act_history'] = self.shift_action(info['act_history'], action)
     return nstate.replace(info=info)
 
-  # ------------------------------------------------------------- Infoprop hooks
+  # ----------------------------------------------------------- Infoprop methods
   def preprocess(self, state: State, action: jp.ndarray):
     nn_input = jp.concatenate(
         [state.info['phys_state_history'], state.info['act_history']], axis=-1)
@@ -131,7 +131,7 @@ class DefaultInfopropWrappable(Wrapper, InfopropWrappable):
                                    state.info['physics_state'])
     return reward, done, {}
 
-  # ------------------------------------------------------------- data contract
+  # -------------------------------------------------- buffer layout declarations
   @property
   def dummy_physics_transition(self) -> Transition:
     ms, oh, ah = self.model_state_size, self.obs_history, self.act_history

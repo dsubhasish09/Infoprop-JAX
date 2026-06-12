@@ -10,7 +10,7 @@ The model-rollout stack wraps an ``InfopropEnv`` (built via ``wrap_custom``):
     so it is not vmapped.
   * ``CustomEpisodeWrapper`` - episode step counting, truncation (incl. entropy-cutoff truncation),
     and per-episode metric aggregation.
-  * ``CustomAutoResetWrapper`` - reverts env-owned + entropy state to its episode-start values on
+  * ``CustomAutoResetWrapper`` - reverts the env's own + entropy state to its episode-start values on
     ``done`` (driven by the env's ``reset_carry_keys``), and tracks rollout-length counters.
 
 The real env is wrapped with ``wrap`` (standard Vmap/Episode + ``CustomAutoResetWrapper2``).
@@ -216,7 +216,7 @@ class CustomAutoResetWrapper(Wrapper):
 
     def __init__(self, env: Env):
         super().__init__(env)
-        # Env-owned dynamic info keys (env-declared) plus the framework-owned entropy
+        # The env's dynamic info keys (declared via reset_carry_keys) plus the entropy
         # accumulators are reverted to their episode-start values on `done`.
         self._carry_keys = list(env.reset_carry_keys) + [
             'accumulated_conditional_entropy', 'current_conditional_entropy']
@@ -291,7 +291,7 @@ class CustomAutoResetWrapper2(Wrapper):
             state.info[f'first_{k}'] = state.info[k]
         # The values actually reached this step, before any auto-reset revert.
         # Consumers of the *next* state (physics transitions for model training,
-        # bootstrapped SAC targets) must read these, since obs and the env-owned
+        # bootstrapped SAC targets) must read these, since obs and the env's
         # carry keys are reverted to the episode start on done.
         state.info['pre_reset_obs'] = state.obs
         for k in self.env.reset_carry_keys:
@@ -318,7 +318,7 @@ class CustomAutoResetWrapper2(Wrapper):
             pipeline_state = state.pipeline_state
         obs = jax.tree.map(where_done, state.info['first_obs'], state.obs)
 
-        # Reset env-owned info-dict fields (env-declared) + steps in one combined pass.
+        # Reset the env's info-dict fields (declared via reset_carry_keys) + steps in one combined pass.
         carry_keys = self.env.reset_carry_keys
         first_info = {k: state.info[f'first_{k}'] for k in carry_keys}
         first_info['steps'] = jp.zeros_like(state.info['steps'])
