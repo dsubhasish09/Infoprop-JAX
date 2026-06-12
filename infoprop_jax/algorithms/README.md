@@ -1,4 +1,4 @@
-# Algorithms — Infoprop Dyna
+# Algorithms - Infoprop Dyna
 
 This directory contains the Infoprop Dyna training loop and all supporting neural network and model-learning utilities.
 
@@ -12,18 +12,18 @@ Infoprop Dyna fixes this by reinterpreting each ensemble prediction as a *noisy 
 
 At each rollout step, given current state `s_t` and action `a_t`:
 
-1. **Ensemble prediction** — query all E members:
+1. **Ensemble prediction** - query all E members:
    ```
    mu_e, Sigma_e = p_e(s_t, a_t)   for e = 1..E
    ```
 
-2. **Precision-weighted fusion** — pool ensemble predictions:
+2. **Precision-weighted fusion** - pool ensemble predictions:
    ```
    fused_var  = 1 / mean(1 / Sigma_e)
    fused_mean = fused_var * mean(mu_e / Sigma_e)
    ```
 
-3. **Epistemic variance** — disagreement between ensemble means:
+3. **Epistemic variance** - disagreement between ensemble means:
    ```
    epist_var = mean((mu_e - fused_mean)^2)
    ```
@@ -47,7 +47,7 @@ The next rollout state is then **sampled** as `fused_mean + sqrt(fused_var) * no
 only aleatoric uncertainty.
 
 These steps are env-agnostic and live in `infoprop_jax/envs/infoprop_env.py` (`decode_delta`,
-`infoprop_core`). The environment supplies only the surrounding hooks — `preprocess` (state/action →
+`infoprop_core`). The environment supplies only the surrounding methods - `preprocess` (state/action →
 NN inputs), `augment_prediction` (optional extra structure), and `postprocess` (rebuild the State).
 See `infoprop_jax/envs/README.md`.
 
@@ -64,16 +64,16 @@ A rollout terminates early if either:
 - Per-step entropy exceeds `lambda_1` (model is locally unreliable), or
 - Accumulated entropy exceeds `lambda_2` (total corruption budget exhausted).
 
-Both thresholds are derived automatically from the training buffer — no manual tuning required.
+Both thresholds are derived automatically from the training buffer - no manual tuning required.
 
 ## Environment State
 
 Infoprop trains a probabilistic dynamics model on the `model_state` exposed by the environment. Any
 environment-specific state factorization, integrated context, task reconstruction, or history window
-belongs to the environment implementation behind the `InfopropWrappable` contract — the training
+belongs to the environment implementation behind the `InfopropWrappable` base class - the training
 loop here carries no env-specific field names.
 
-For the contract, see `infoprop_jax/envs/README.md`; for the Wheelbot specifics,
+For what an environment must define, see `infoprop_jax/envs/README.md`; for the Wheelbot specifics,
 `infoprop_jax/envs/wheelbot/README.md`.
 
 ## SAC Policy Training
@@ -92,7 +92,7 @@ This yields a large volume of synthetic transitions per real episode.
 | File | Role |
 |---|---|
 | `infoprop.py` | **Main training loop (env-agnostic).** Model training, cutoff computation, SAC updates, data collection, evaluation. Start here. |
-| `util/nn/gaussian_env_model.py` | Probabilistic ensemble `{p_e}` — E independent MLPs predicting (mean, logvar). |
+| `util/nn/gaussian_env_model.py` | Probabilistic ensemble `{p_e}` - E independent MLPs predicting (mean, logvar). |
 | `util/nn/mlp.py` | Shared MLP backbone for actor, critic, and dynamics model. |
 | `util/model_learning/model_trainer.py` | Orchestrates ensemble training (init, NLL update step, normalisation stats). |
 | `util/model_learning/model_update_step.py` | Per-member NLL loss and AdamW gradient step (delta target uses the env `dt`). |

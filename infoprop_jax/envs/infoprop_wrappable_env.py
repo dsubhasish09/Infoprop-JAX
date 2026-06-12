@@ -1,12 +1,13 @@
-"""InfopropWrappable: the contract a real MJX env must satisfy to be Infoprop-wrappable.
+"""InfopropWrappable: what a real MJX env must define to be Infoprop-wrappable.
 
-`InfopropWrappable` is a pure mixin (no Brax base class): it only declares the Infoprop
-hooks plus shared history helpers. A host class provides the actual Brax env interface
-(`reset`, `step`, `dt`, `action_size`, `observation_size`) in one of two ways:
+`InfopropWrappable` is a small base class with no Brax functionality of its own: it only
+declares the methods Infoprop calls on the env, plus shared history helpers. The usual
+Brax env machinery (`reset`, `step`, `dt`, `action_size`, `observation_size`) comes from
+a second base class, in one of two ways:
 
-  * a hand-written env subclasses both: ``class MyEnv(PipelineEnv, InfopropWrappable)``,
-    implementing its *real* physics on the `PipelineEnv` side and the hooks below;
-  * an adapter around an existing stock Brax env subclasses
+  * a hand-written env inherits from both: ``class MyEnv(PipelineEnv, InfopropWrappable)``,
+    implementing its *real* physics on the `PipelineEnv` side and the methods below;
+  * a class built around an existing stock Brax env inherits from
     ``(brax.envs.base.Wrapper, InfopropWrappable)`` — see
     `DefaultInfopropWrappable` in default_wrappable.py for the ready-made simple case
     (model state == observation, no context).
@@ -15,14 +16,14 @@ Either way the result can be turned into a learned-dynamics model environment:
 
     model_env = InfopropEnv(MyEnv(cfg), min_log_var=..., max_log_var=...)
 
-`InfopropEnv` (see infoprop_env.py) owns the fixed Infoprop core math and calls these hooks
-on the wrapped env. One model step runs:
+`InfopropEnv` (see infoprop_env.py) owns the fixed Infoprop core math and calls these
+methods on the wrapped env. One model step runs:
 
     preprocess -> NN forward -> decode -> augment_prediction -> infoprop_core -> postprocess
        (here)     (InfopropEnv)  (InfopropEnv)    (here, opt.)    (InfopropEnv)   (here)
 
 `preprocess` also maps the RL action to the action applied to the dynamics (a control prior,
-if any); `postprocess` rebuilds the State and reward. There are no separate "step half" hooks.
+if any); `postprocess` rebuilds the State and reward. There are no separate "step half" methods.
 
 State vectors:
   * model_state  (model_state_size)  - the dims the ensemble predicts deltas of.
@@ -34,18 +35,19 @@ State vectors:
 
 Required attributes the subclass sets in __init__: `model_state_size`, `context_size`,
 `full_state_size`, `obs_history`, `act_history`. (`dt` / `action_size` /
-`observation_size` are host-class obligations: provided by `PipelineEnv`, or forwarded
-to the inner env by `brax.envs.base.Wrapper`.)
+`observation_size` come from the Brax base class: `PipelineEnv` provides them directly,
+`brax.envs.base.Wrapper` passes them through from the inner env.)
 
 Fast model rollouts (skipping the MJX `pipeline_state` during model rollouts) are an
-optional, purely env-side optimisation: the framework and wrappers are agnostic to it and
-only react to the *structure* of the State you emit (`pipeline_state is None` => skipped).
-If you want it, own a flag (e.g. `self.fast_model_rollout`, read from cfg) and gate
-`pipeline_state` construction on it consistently in `postprocess` and `reset_from_buffer`.
+optional optimisation entirely inside your env: the training code and wrappers only react
+to the *structure* of the State you return (`pipeline_state is None` => skipped). If you
+want it, keep a flag (e.g. `self.fast_model_rollout`, read from cfg) and apply it
+consistently in `postprocess` and `reset_from_buffer`.
 
-`info`-key ownership: keys holding the model state, histories, context and task id are
-*env-owned* — name them whatever you like; only your hooks touch them. Declare the dynamic
-ones in `reset_carry_keys` and the per-transition context fields via `dummy_physics_transition`.
+`info` keys: the keys holding the model state, histories, context and task id belong to
+*your environment* — name them whatever you like; only your methods touch them. Declare
+the dynamic ones in `reset_carry_keys` and the per-transition context fields via
+`dummy_physics_transition`.
 """
 
 from typing import Dict, List, Tuple
@@ -57,16 +59,16 @@ from brax.training.types import Transition
 
 
 class InfopropWrappable:
-  """Mixin declaring the env-specific hooks the Infoprop core needs.
+  """Declares the env-specific methods the Infoprop core needs.
 
-  Host classes additionally provide the standard Brax env interface (`reset`, `step`,
-  `dt`, `action_size`, `observation_size`) — by subclassing `PipelineEnv` (real
-  physics) or `brax.envs.base.Wrapper` (adapting an existing env). The default
+  The standard Brax env machinery (`reset`, `step`, `dt`, `action_size`,
+  `observation_size`) comes from a second base class — `PipelineEnv` (real physics)
+  or `brax.envs.base.Wrapper` (building on an existing env). The default
   `augment_prediction` (identity) plus a `preprocess` that passes the action through
   make a plain env with `context_size == 0` work with no extra structure.
   """
 
-  # ----------------------------------------------------------------- required hooks
+  # --------------------------------------------------------------- required methods
   def preprocess(
       self, state: State, action: jp.ndarray
   ) -> Tuple[jp.ndarray, jp.ndarray, jp.ndarray, jp.ndarray, jp.ndarray]:
@@ -77,7 +79,7 @@ class InfopropWrappable:
       * ``curr_model_state`` (shape ``(model_state_size,)``) is what the decoded delta
         is integrated onto;
       * ``curr_context`` (shape ``(context_size,)``, possibly empty) is the extra state
-        the ``augment_prediction`` hook needs;
+        ``augment_prediction`` needs;
       * ``applied_action`` is the action sent to the dynamics — inject any control
         prior here (default: just the RL action);
       * ``processed_action`` is the action used for observation/reward (typically the
@@ -90,9 +92,9 @@ class InfopropWrappable:
                   processed_action: jp.ndarray) -> State:
     """Rebuild a valid Brax State from a sampled next model state + context.
 
-    Must set the new observation, env-owned `info`, reward and done. The
-    framework-owned rng + entropy accumulation are already set on ``state`` before
-    this is called.
+    Must set the new observation, this env's own `info` keys, reward and done. The
+    rng + entropy-accumulation keys managed by the training code are already set on
+    ``state`` before this is called.
 
     Building the MJX ``pipeline_state`` is the env's own choice (the "fast rollout"
     optimisation): set ``pipeline_state=None`` to skip it. Whatever you choose, the
@@ -114,7 +116,7 @@ class InfopropWrappable:
     """
     raise NotImplementedError
 
-  # ------------------------------------------------------------- optional hooks
+  # --------------------------------------------------------------- optional methods
   def augment_prediction(
       self, member_mean: jp.ndarray, member_var: jp.ndarray,
       curr_model_state: jp.ndarray, curr_context: jp.ndarray
@@ -128,7 +130,7 @@ class InfopropWrappable:
     """
     return member_mean, member_var
 
-  # ------------------------------------------------------------- data contract
+  # ------------------------------------------------------ buffer layout declarations
   @property
   def dummy_physics_transition(self) -> Transition:
     """Zero-filled `Transition` that sizes the physics replay buffer and, via its
@@ -152,7 +154,7 @@ class InfopropWrappable:
 
   @property
   def reset_carry_keys(self) -> List[str]:
-    """Env-owned dynamic info keys the auto-reset wrappers revert on `done`."""
+    """This env's dynamic info keys that the auto-reset wrappers restore on `done`."""
     raise NotImplementedError
 
   # ------------------------------------------------------------------- history utils

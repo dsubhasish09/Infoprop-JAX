@@ -22,12 +22,10 @@ from .model_update_step import (
     update_nll,
     per_ensemble_nll,
 )
-# from mbpo.data.dataset import Dataset
 from infoprop_jax.algorithms.util.nn.gaussian_env_model import GaussianEnsembleModel
 
 DataType = Union[np.ndarray, Dict[str, "DataType"]]
 Params = flax.core.FrozenDict[str, Any]
-# DatasetDict = Dict[str, DataType]
 
 
 def _update_jit(
@@ -60,7 +58,6 @@ def _update_jit(
     )
 
 
-# @functools.partial(jax.jit, static_argnames=['obs_history', 'act_history', 'obs_size', 'act_size'])
 def compute_loss(
     model: TrainState,
     batch: Dataset,
@@ -152,8 +149,6 @@ class ModelTrainer(NamedTuple):
             params=model_params,
             tx=optax.adamw(learning_rate=self.model_lr, weight_decay=self.model_wd),
         )
-        # tabulate_fn = nn.tabulate(model_def, jax.random.PRNGKey(0))
-        # print(tabulate_fn(observations, actions, self._obs_mean, self._obs_std))
 
         _rng = rng
         _elites = jnp.arange(self.n_elites)

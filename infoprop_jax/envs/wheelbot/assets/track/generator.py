@@ -356,9 +356,6 @@ def create_track(seed, zoom_factor=0.09):
     centerline_shifted = centerline_unique - start_xy_scaled
     start_xy_shifted = jp.array([0, 0])
 
-    #if not valid_extend(cone_pos_shifted):
-        #raise ValueError("Track is not valid, cones are out of bounds. Consider scaling the track down further.")
-
     #Split cone array into 2 arrays one for the inner and one for the outer cones
     outer_mask = cone_type == 1
     inner_mask = cone_type == 2

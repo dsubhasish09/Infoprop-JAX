@@ -209,11 +209,10 @@ def train(
     4. Real-world data collection: step the MJX environment with the current policy.
 
   Args:
-      environment: Registered Brax environment name for real (MJX) rollouts.
-      model_environment: Registered Brax environment name for model rollouts.
+      environment: `InfopropWrappable` env instance for real (MJX) rollouts.
+      model_environment: `InfopropEnv`-wrapped instance for model rollouts.
       ... (remaining args are passed through from Hydra config)
   """
-#   jax.config.update("jax_log_compiles", True)
   # Model-state dimensions inferred from the env's data contract (the dummy
   # transition sizes the physics buffer, so it is the single source of truth);
   # histories and control timestep read off the env itself.
@@ -530,7 +529,6 @@ def train(
             loss_key,
         )
         improved = loss_ < loss
-        # print(best_training_state.model_state.step.shape)
         loss = jnp.where(improved, loss_, loss)
         steps_since_last_improvement = jnp.where(improved, 0, steps_since_last_improvement + 1)
         best_model_params = tree_where(
@@ -612,7 +610,6 @@ def train(
         training_state, best_training_state, loss, steps_since_last_improvement, losses = model_training_step(
             training_state, training_transitions, validation_transitions, step_key, best_training_state, loss, steps_since_last_improvement
         )
-        # logging.info('Losses: %s', losses)
         if steps_since_last_improvement is not None and steps_since_last_improvement >= patience:
             logging.info('Early stopping triggered')
             break
@@ -767,7 +764,6 @@ def train(
   ]:
     """Get experience from the real environment using current policy and insert it into the replay buffer."""
     policy = make_policy((normalizer_params, policy_params))
-    # curr_state = jnp.concatenate([*env_state.pipeline_state.qpos, *env_state.pipeline_state.qvel], axis=-1)
     env_state, transitions, transitions_state = actor_step(
         env, env_state, policy, key, extra_fields=('truncation',)
     )
@@ -795,7 +791,6 @@ def train(
   ]:
     """Get experience from the real environment using a random policy and insert it into the replay buffer."""
     policy = make_policy((normalizer_params, policy_params))
-    # curr_state = jnp.concatenate([*env_state.pipeline_state.qpos, *env_state.pipeline_state.qvel], axis=-1)
     env_state, transitions, transitions_state = random_actor_step(
         env, env_state, policy, key, extra_fields=('truncation',)
     )
@@ -1081,18 +1076,6 @@ def train(
   ) -> Tuple[TrainingState, envs.State, ReplayBufferState, Metrics]:
     """Performs a single epoch of training for the agent."""
 
-    # def f(carry, unused_t):
-    #   ts, es, bs, k = carry
-    #   k, new_key = jax.random.split(k)
-    #   ts, es, bs, metrics = agent_training_step(ts, es, bs, k)
-    #   return (ts, es, bs, new_key), metrics
-
-    # (training_state, model_env_state, model_buffer_state, key), metrics = jax.lax.scan(
-    #     f,
-    #     (training_state, model_env_state, model_buffer_state, key),
-    #     (),
-    #     length=model_steps_per_epoch,
-    # )
     training_state, model_env_state, model_buffer_state, metrics = agent_training_step(training_state, model_env_state, model_buffer_state, key)
     metrics = jax.tree_util.tree_map(jnp.mean, metrics)
     return training_state, model_env_state, model_buffer_state, metrics
@@ -1282,41 +1265,53 @@ def train(
             logging.info('Resetting model parameters and optimizer state...')
             training_state = _reset_model_params(training_state)
         logging.info('Starting Model Training...')
-        # All index arrays have fixed Python-int sizes so every downstream jit
-        # compiles once. We always permute max_physics_replay_size indices and map
-        # into the valid range via modulo — replay_size_int is a runtime value (not a
-        # shape), so wrapping it in jnp.array prevents JAX from folding it as a literal.
+        # Dataset shapes are bucketed: the valid replay size is rounded up to the
+        # next power-of-two multiple of the per-trial collection size (capped at
+        # buffer capacity), so every downstream jit compiles once per bucket
+        # (~log2(capacity / real_steps_per_trial) compilations in total) while the
+        # dataset tracks the real buffer size instead of upsampling early data
+        # capacity/size times over.
         replay_size_int = int(replay_size)
         data = physics_buffer_state.data  # [max_physics_replay_size, raw_dim] — fixed
 
-        fixed_train_size = int(0.8 * max_physics_replay_size / model_batch_size) * model_batch_size
-        fixed_val_size   = max_physics_replay_size - fixed_train_size
-        num_updates_in_epoch = fixed_train_size // model_batch_size
+        bucket_size = max(real_steps_per_trial, 2 * model_batch_size)
+        while bucket_size < replay_size_int:
+            bucket_size *= 2
+        bucket_size = min(bucket_size, max_physics_replay_size)
 
+        train_bucket_size = int(0.8 * bucket_size / model_batch_size) * model_batch_size
+        val_bucket_size = bucket_size - train_bucket_size
+        num_updates_in_epoch = train_bucket_size // model_batch_size
+
+        # Split the valid indices before padding so duplicated samples never cross
+        # the train/val boundary (no validation leakage), then pad each side up to
+        # its bucket size by cycling within that side (duplication factor < 2).
         local_key, perm_key = jax.random.split(local_key)
-        full_perm  = jax.random.permutation(perm_key, max_physics_replay_size)
-        valid_perm = full_perm % jnp.array(replay_size_int, dtype=jnp.int32)
-        train_perm = valid_perm[:fixed_train_size]
-        val_perm   = valid_perm[fixed_train_size:]
+        valid_perm = jax.random.permutation(perm_key, replay_size_int)
+        num_valid_train = int(0.8 * replay_size_int)
+        train_idx = valid_perm[:num_valid_train][jnp.arange(train_bucket_size) % num_valid_train]
+        val_idx = valid_perm[num_valid_train:][
+            jnp.arange(val_bucket_size) % (replay_size_int - num_valid_train)]
+        full_idx = valid_perm[jnp.arange(bucket_size) % replay_size_int]
 
-        # full_transitions — fixed shape, always valid data, compiles once
-        full_transitions = _unflatten(data[valid_perm, :])
+        # full_transitions — bucket-sized, feeds normalisation stats and cutoffs
+        full_transitions = _unflatten(data[full_idx, :])
 
-        # train_data — fixed shape [fixed_train_size, raw_dim], compiles once.
+        # train_data — [train_bucket_size, raw_dim].
         # Each of the n_ensemble members gets an independent shuffle of the training set.
         n_ensemble = model_trainer.n_ensemble
-        train_data = data[train_perm, :]
+        train_data = data[train_idx, :]
         local_key, *shuffle_keys = jax.random.split(local_key, n_ensemble + 1)
         shuffle_keys = jnp.stack(shuffle_keys, axis=0)
-        shuffle_idx = jax.vmap(lambda k: jax.random.permutation(k, fixed_train_size))(shuffle_keys)
+        shuffle_idx = jax.vmap(lambda k: jax.random.permutation(k, train_bucket_size))(shuffle_keys)
         train_data = train_data[shuffle_idx, :]
 
-        # val_data — fixed shape [fixed_val_size, raw_dim], compiles once
-        val_data = data[val_perm, :]
+        # val_data — [val_bucket_size, raw_dim]
+        val_data = data[val_idx, :]
 
         def _reshape_train(x):
-            # x: (n_ensemble, fixed_train_size, leaf_dim) from _unflatten_vmap
-            swapped = x.swapaxes(0, 1)  # (fixed_train_size, n_ensemble, leaf_dim)
+            # x: (n_ensemble, train_bucket_size, leaf_dim) from _unflatten_vmap
+            swapped = x.swapaxes(0, 1)  # (train_bucket_size, n_ensemble, leaf_dim)
             return jnp.reshape(swapped, (num_updates_in_epoch, -1) + swapped.shape[1:])
             # result: (num_updates_in_epoch, model_batch_size, n_ensemble, leaf_dim)
         train_transitions = jax.tree_util.tree_map(_reshape_train, _unflatten_vmap(train_data))
@@ -1393,7 +1388,6 @@ def train(
         logging.info('Evaluating Agent and Model...')
         params = _unpmap((training_state.normalizer_params, training_state.policy_params))
 
-        # logging.info('Running Evaluator...')
         metrics = evaluator.run_evaluation(
                                                 params,
                                                 metrics,

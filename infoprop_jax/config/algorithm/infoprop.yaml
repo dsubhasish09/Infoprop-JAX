@@ -23,7 +23,7 @@ agent_hidden_layer_sizes: [256, 256]
 policy_network_layer_norm: False
 # Layer norm on the critic prevents unbounded Q-value growth (bootstrapped
 # overestimation), which otherwise diverges on high-dimensional action spaces
-# such as the humanoid (see envs/humanoid/diagnose_sac_training.py).
+# such as the humanoid.
 q_network_layer_norm: True
 utd_ratio: 10                   # SAC grad updates per model env step
 target_entropy: -1.0
