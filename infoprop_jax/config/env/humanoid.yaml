@@ -26,6 +26,14 @@ env:
   fast_model_rollout: true
 
 algorithm:
-  target_entropy: -21   # = -action_dim for the 21-dof humanoid
   upper_quantile: 0.99
   discounting: 0.99
+  num_trials: 50
+  utd_ratio: 10
+  target_entropy: -21
+  tune_entropy: True
+  real_steps_per_trial: 10000
+  num_real_train_envs: 10
+  episode_length: 1000
+  num_model_envs: 1000
+  model_subsampling: 1.0

@@ -60,7 +60,6 @@ def update_nll(
         mean, logvar = model.apply_fn(
             {"params": model_params}, state, action, obs_mean, obs_std
         )
-        # jax.debug.print("mean: {mean}, \n var: {var}, \n target_state: {target_state}", mean=mean.mean(axis=0).mean(axis=0), var=var.mean(axis=0).mean(axis=0), target_state=target_state.mean(axis=0))
         # Negative log-likelihood for a diagonal Gaussian (heteroscedastic)
         state_loss = 0.5 * (jnp.square(target_state - mean) * jnp.exp(-logvar) + logvar + _LOG_2PI).mean(axis=(0, 1)).sum()
         return state_loss

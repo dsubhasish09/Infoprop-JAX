@@ -531,16 +531,6 @@ class WheelbotEnv(PipelineEnv, InfopropWrappable):
 
         rng, pos_key = jax.random.split(rng)
         init_xy, init_angle = trajectory.get_init_pos(0)
-        # get random initial location
-        # rng, xy_key = jax.random.split(rng)
-        # offset_xy = jp.clip(jax.random.normal(xy_key, shape=init_xy.shape) * self.init_xy_std,
-        #                     -0.9*track_width/2, 0.9*track_width/2)
-        # init_xy = init_xy + offset_xy
-        # get random initial angle
-        # rng, angle_key = jax.random.split(rng)
-        # offset_angle = jp.clip(jax.random.normal(angle_key, shape=init_angle.shape)
-        #                        * self.init_angle_std, -jp.pi/4, jp.pi/4)
-        # init_angle = init_angle + offset_angle
         # Create state at segment 0.
         init_robot_state = jp.array([init_angle, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 
