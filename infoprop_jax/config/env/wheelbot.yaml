@@ -34,5 +34,3 @@ env:
 
 # The algorithm defaults in algorithm/infoprop.yaml are wheelbot-tuned, so this
 # env forces nothing.
-algorithm:
-  tune_entropy: True
