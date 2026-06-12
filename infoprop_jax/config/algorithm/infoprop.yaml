@@ -7,6 +7,7 @@ num_trials: 10                  # outer loop: collect -> train model -> train ag
 real_steps_per_trial: 10000     # real transitions collected each trial
 num_real_train_envs: 5
 physics_buffer_size: null     # optional; defaults to num_trials * real_steps_per_trial
+random_init: True              # True: initial data uses uniform random actions; False: untrained policy
 
 # --- model rollouts (synthetic data) ---
 num_model_envs: 10000
@@ -28,7 +29,7 @@ q_network_layer_norm: True
 utd_ratio: 10                   # SAC grad updates per model env step
 target_entropy: -1.0
 tau: 0.005
-tune_entropy: True
+tune_entropy: False
 # Entropy temperature: fixed value when tune_entropy=False, initial value when True.
 alpha: 0.1
 reset_agent_per_trial: False

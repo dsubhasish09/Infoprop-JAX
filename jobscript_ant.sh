@@ -3,8 +3,8 @@
 
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
-#SBATCH --job-name=humanoid_infoprop
-#SBATCH --output=humanoid_%A_%a.out
+#SBATCH --job-name=wheelbot_experiment
+#SBATCH --output=output_.out
 #SBATCH --account=rwth2087
 #SBATCH --gres=gpu:1
 #SBATCH --time=00:35:00
@@ -22,9 +22,9 @@ export MUJOCO_GL=egl
 # causing OOM on large replay buffers.
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 
-# Humanoid-forced algorithm values (target_entropy, discounting, upper_quantile)
-# come from env/humanoid.yaml; only experiment one-offs are listed here.
+# Only deviations from the defaults (algorithm/infoprop.yaml + env/wheelbot.yaml)
+# are listed: the 10k-envs / 0.1-subsampling experiment with fixed entropy.
 python -m infoprop_jax.main \
-    env=humanoid \
-    experiment=humanoid_infoprop \
+    env=ant \
+    experiment=ant_infoprop \
     seed=$RANDOM

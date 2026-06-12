@@ -25,5 +25,6 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=false
 # Only deviations from the defaults (algorithm/infoprop.yaml + env/wheelbot.yaml)
 # are listed: the 10k-envs / 0.1-subsampling experiment with fixed entropy.
 python -m infoprop_jax.main \
-    experiment=new_general_test \
+    env=wheelbot \
+    experiment=wheelbot_infoprop \
     seed=$RANDOM

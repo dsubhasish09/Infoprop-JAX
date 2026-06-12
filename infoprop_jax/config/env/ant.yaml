@@ -14,4 +14,4 @@ env:
 
 algorithm:
   target_entropy: -8   # = -action_dim for ant
-  discounting: 0.99
+  num_trials: 50

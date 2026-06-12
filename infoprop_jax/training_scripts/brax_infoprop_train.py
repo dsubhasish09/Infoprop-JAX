@@ -131,6 +131,7 @@ def main(cfg: omegaconf.DictConfig):
             'real_steps_per_trial', train_cfg.get('min_physics_replay_size')),
         physics_buffer_size=train_cfg.get(
             'physics_buffer_size', train_cfg.get('max_physics_replay_size')),
+        random_init=train_cfg.get('random_init', True),
         agent_learning_rate=train_cfg.agent_learning_rate,
         agent_batch_size=train_cfg.agent_batch_size,
         agent_hidden_layer_sizes=train_cfg.agent_hidden_layer_sizes,
