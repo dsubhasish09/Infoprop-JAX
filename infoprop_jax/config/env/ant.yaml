@@ -14,7 +14,6 @@ env:
 
 algorithm:
   discounting: 0.99
-  upper_quantile: 0.99
   target_entropy: -8   # = -action_dim for ant
   num_trials: 50
   tune_entropy: False

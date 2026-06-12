@@ -52,14 +52,6 @@ lower_quantile: 0.01    # quantile of real-data entropy → λ₂ (accumulated c
 upper_quantile: 1.0     # quantile of real-data entropy → λ₁ (per-step cutoff)
 action_repeat: 1
 
-# --- correlated exploration noise (full docs: config/README.md) ---
-exploration_noise:
-  type: pink        # none | ar1 | pink
-  beta: 0.01        # ar1 only: correlation time ~ 1/beta steps
-  num_filters: 8    # pink only: slowest filter at 2^(num_filters-1) steps
-  apply_real: True  # use correlated noise for real-env collection
-  apply_model: True # use correlated noise for model rollouts
-
 # miscellaneous
 num_real_eval_envs: 1000
 discounting: 0.999

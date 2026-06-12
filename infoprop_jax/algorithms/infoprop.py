@@ -38,7 +38,6 @@ from brax.training.types import Policy
 from brax.training.types import PRNGKey
 from flax.training.train_state import TrainState
 
-from infoprop_jax.algorithms.util import exploration_noise
 from infoprop_jax.algorithms.util.custom_evaluator import CustomEvaluator
 from infoprop_jax.envs.contract_validation import validate_infoprop_contract
 from infoprop_jax.algorithms.util.custom_wrapper import wrap_custom, wrap
@@ -199,7 +198,6 @@ def train(
     reset_agent_per_trial: bool = False,
     reset_model_replay_buffer: bool = False,
     reset_model_per_trial: bool = False,
-    exploration_noise_config: Optional[Dict] = None,
 ):
   """Main Infoprop Dyna training loop.
 
@@ -331,25 +329,6 @@ def train(
       q_network_layer_norm=q_network_layer_norm,
   )
   make_policy = sac_networks.make_inference_fn(sac_network)
-
-  # Temporally correlated latent exploration noise (ar1/pink). With type 'none'
-  # every noise branch below is skipped at trace time, so the compiled training
-  # step is identical to the uncorrelated baseline.
-  _noise_cfg = dict(exploration_noise_config or {})
-  noise_type = _noise_cfg.get('type', 'none')
-  use_real_noise = noise_type != 'none' and _noise_cfg.get('apply_real', True)
-  use_model_noise = noise_type != 'none' and _noise_cfg.get('apply_model', True)
-  if noise_type != 'none':
-    noise_init, noise_sample = exploration_noise.make_noise_fns(
-        noise_type,
-        beta=_noise_cfg.get('beta', 0.1),
-        num_filters=_noise_cfg.get('num_filters', 5),
-    )
-    make_correlated_policy = sac_networks.make_correlated_inference_fn(sac_network)
-    logging.info(
-        'correlated exploration noise: type=%s apply_real=%s apply_model=%s',
-        noise_type, use_real_noise, use_model_noise,
-    )
 
   evaluator = CustomEvaluator(
       eval_env,
@@ -695,19 +674,14 @@ def train(
     model_env_state: State,
     policy: Policy,
     key: PRNGKey,
-    noise_state=(),
     extra_fields: Sequence[str] = (),
-        ) -> Tuple[State, Any, Transition]:
+        ) -> Tuple[State, Transition]:
         """Carries out one model-based rollout step"""
-        if use_model_noise:
-          noise_state, eta = noise_sample(noise_state, key, model_env_state.done)
-          actions, policy_extras = policy(model_env_state.obs, eta)
-        else:
-          actions, policy_extras = policy(model_env_state.obs, key)
+        actions, policy_extras = policy(model_env_state.obs, key)
         nstate = model_env.step(model_env_state, actions)
         state_extras = {x: nstate.info[x] for x in extra_fields}
 
-        return nstate, noise_state, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
+        return nstate, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
             observation=model_env_state.obs,
             action=actions,
             reward=nstate.reward,
@@ -739,19 +713,14 @@ def train(
     env_state: State,
     policy: Policy,
     key: PRNGKey,
-    noise_state=(),
     extra_fields: Sequence[str] = (),
-        ) -> Tuple[State, Any, Transition]:
+        ) -> Tuple[State, Transition]:
         """Carries out one step using the policy in the real environment"""
-        if use_real_noise:
-          noise_state, eta = noise_sample(noise_state, key, env_state.done)
-          actions, policy_extras = policy(env_state.obs, eta)
-        else:
-          actions, policy_extras = policy(env_state.obs, key)
+        actions, policy_extras = policy(env_state.obs, key)
         nstate = env.step(env_state, actions)
         nstate_pre_reset = _pre_reset_view(nstate)
         state_extras = {x: nstate.info[x] for x in extra_fields}
-        return nstate, noise_state, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
+        return nstate, Transition(  # pytype: disable=wrong-arg-types  # jax-ndarray
             observation=env_state.obs,
             action=actions,
             reward=nstate.reward,
@@ -789,19 +758,15 @@ def train(
       buffer_state: ReplayBufferState,
       physics_buffer_state: ReplayBufferState,
       key: PRNGKey,
-      noise_state=(),
   ) -> Tuple[
       running_statistics.RunningStatisticsState,
       Union[envs.State, envs.State],
       ReplayBufferState,
   ]:
     """Get experience from the real environment using current policy and insert it into the replay buffer."""
-    if use_real_noise:
-      policy = make_correlated_policy((normalizer_params, policy_params))
-    else:
-      policy = make_policy((normalizer_params, policy_params))
-    env_state, noise_state, transitions, transitions_state = actor_step(
-        env, env_state, policy, key, noise_state, extra_fields=('truncation',)
+    policy = make_policy((normalizer_params, policy_params))
+    env_state, transitions, transitions_state = actor_step(
+        env, env_state, policy, key, extra_fields=('truncation',)
     )
 
     normalizer_params = running_statistics.update(
@@ -811,7 +776,7 @@ def train(
 
     buffer_state = replay_buffer.insert(buffer_state, transitions)
     physics_buffer_state = replay_buffer_physics_state.insert(physics_buffer_state, transitions_state)
-    return normalizer_params, env_state, buffer_state, physics_buffer_state, noise_state
+    return normalizer_params, env_state, buffer_state, physics_buffer_state
 
   def get_random_experience(
       normalizer_params: running_statistics.RunningStatisticsState,
@@ -848,40 +813,31 @@ def train(
       key: PRNGKey,
   ) -> Tuple[TrainingState, envs.State, ReplayBufferState, PRNGKey]:
     """Warm-start the replay buffer with initial policy (or random) transitions."""
-    # Fresh correlated-noise state per collection phase; it lives only inside
-    # this scan so no outer signature changes.
-    if use_real_noise:
-      key, noise_key = jax.random.split(key)
-      noise_state = noise_init(noise_key, num_real_envs, action_size)
-    else:
-      noise_state = ()
 
     def f(carry, unused):
       del unused
-      training_state, env_state, buffer_state, physics_buffer_state, noise_state, key = carry
+      training_state, env_state, buffer_state, physics_buffer_state, key = carry
       key, new_key = jax.random.split(key)
-      new_normalizer_params, env_state, buffer_state, physics_buffer_state, noise_state = get_experience(
+      new_normalizer_params, env_state, buffer_state, physics_buffer_state = get_experience(
           training_state.normalizer_params,
           training_state.policy_params,
           env_state,
           buffer_state,
           physics_buffer_state,
           key,
-          noise_state,
       )
       new_training_state = training_state.replace(
           normalizer_params=new_normalizer_params,
         #   env_steps=training_state.env_steps + env_steps_per_actor_step,
       )
-      return (new_training_state, env_state, buffer_state, physics_buffer_state, noise_state, new_key), ()
+      return (new_training_state, env_state, buffer_state, physics_buffer_state, new_key), ()
 
-    (training_state, env_state, buffer_state, physics_buffer_state, _, key) = jax.lax.scan(
+    return jax.lax.scan(
         f,
-        (training_state, env_state, buffer_state, physics_buffer_state, noise_state, key),
+        (training_state, env_state, buffer_state, physics_buffer_state, key),
         (),
         length=num_prefill_real_actor_steps,
     )[0]
-    return training_state, env_state, buffer_state, physics_buffer_state, key
 
   prefill_replay_buffer = jax.jit(prefill_replay_buffer)
 
@@ -927,7 +883,6 @@ def train(
       model_env_state: Union[envs.State, envs.State],
       model_buffer_state: ReplayBufferState,
       key: PRNGKey,
-      noise_state=(),
   ) -> Tuple[
       running_statistics.RunningStatisticsState,
       Union[envs.State, envs.State],
@@ -935,12 +890,9 @@ def train(
   ]:
     """Get synthetic experience from the model environment and insert it into the replay buffer."""
     # nonlocal model_env
-    if use_model_noise:
-      policy = make_correlated_policy((normalizer_params, policy_params))
-    else:
-      policy = make_policy((normalizer_params, policy_params))
-    model_env_state, noise_state, model_transitions = model_actor_step(
-        model_env, model_env_state, policy, key, noise_state, extra_fields=('truncation',)
+    policy = make_policy((normalizer_params, policy_params))
+    model_env_state, model_transitions = model_actor_step(
+        model_env, model_env_state, policy, key, extra_fields=('truncation',)
     )
 
     normalizer_params = running_statistics.update(
@@ -961,7 +913,7 @@ def train(
           lambda x: x[subsample_idx], model_transitions
       )
     model_buffer_state = model_replay_buffer.insert(model_buffer_state, model_transitions)
-    return normalizer_params, model_env_state, model_buffer_state, noise_state
+    return normalizer_params, model_env_state, model_buffer_state
 
   def agent_sgd_step(
       carry: Tuple[TrainingState, PRNGKey], transitions: Transition
@@ -1060,15 +1012,6 @@ def train(
     """Collect one batch of model rollouts and perform `utd_ratio` SAC updates."""
     experience_key, training_key = jax.random.split(key)
 
-    # Fresh correlated-noise state per epoch: model envs are freshly branched
-    # from buffer states each epoch, so noise also starts from its stationary
-    # distribution here. It lives only inside the scan below.
-    if use_model_noise:
-      experience_key, noise_key = jax.random.split(experience_key)
-      noise_state = noise_init(noise_key, num_envs, model_action_size)
-    else:
-      noise_state = ()
-
     # Extract model params from the env state before the scan so they are
     # captured as a closure constant rather than carried as mutable loop state.
     # This prevents XLA from including ~34 MB of params in the scan carry for
@@ -1078,28 +1021,27 @@ def train(
     _lean_env_state = model_env_state.replace(info=_lean_info)
 
     def f(carry, unused):
-        normalizer_params, policy_params, lean_env_state, model_buffer_state, noise_state, experience_key = carry
+        normalizer_params, policy_params, lean_env_state, model_buffer_state, experience_key = carry
         experience_key, new_key = jax.random.split(experience_key)
         # Temporarily inject model params (from closure) for the step function.
         full_info = dict(lean_env_state.info)
         full_info['model'] = _model_params
         full_env_state = lean_env_state.replace(info=full_info)
-        new_normalizer_params, full_env_state, model_buffer_state, noise_state = get_model_based_experience(
+        new_normalizer_params, full_env_state, model_buffer_state = get_model_based_experience(
             normalizer_params,
             policy_params,
             full_env_state,
             model_buffer_state,
             experience_key,
-            noise_state,
         )
         # Strip model params from the output carry.
         lean_info_out = {k: v for k, v in full_env_state.info.items() if k != 'model'}
         lean_env_state_out = full_env_state.replace(info=lean_info_out)
-        return (new_normalizer_params, policy_params, lean_env_state_out, model_buffer_state, noise_state, new_key), ()
+        return (new_normalizer_params, policy_params, lean_env_state_out, model_buffer_state, new_key), ()
 
-    (normalizer_params, _, _lean_env_state, model_buffer_state, _, _), _ = jax.lax.scan(
+    (normalizer_params, _, _lean_env_state, model_buffer_state, _), _ = jax.lax.scan(
         f,
-        (training_state.normalizer_params, training_state.policy_params, _lean_env_state, model_buffer_state, noise_state, experience_key),
+        (training_state.normalizer_params, training_state.policy_params, _lean_env_state, model_buffer_state, experience_key),
         (),
         length=model_steps_per_epoch,
     )

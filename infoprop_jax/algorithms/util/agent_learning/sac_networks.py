@@ -22,7 +22,6 @@ from brax.training import types
 from brax.training.types import PRNGKey
 import flax
 from flax import linen
-import jax.numpy as jnp
 
 
 @flax.struct.dataclass
@@ -55,32 +54,6 @@ def make_inference_fn(sac_networks: SACNetworks):
     return policy
 
   return make_policy
-
-
-def make_correlated_inference_fn(sac_networks: SACNetworks):
-  """Like make_inference_fn, but the policy takes a pre-drawn latent noise.
-
-  The returned policy samples `tanh(loc + scale * eta)` where `eta` is supplied
-  by the caller (e.g. temporally correlated noise with N(0, 1) marginals), so
-  per-step action marginals match the standard stochastic policy.
-  """
-
-  def make_correlated_policy(params: types.PolicyParams):
-
-    def policy(
-        observations: types.Observation, eta: jnp.ndarray
-    ) -> Tuple[types.Action, types.Extra]:
-      logits = sac_networks.policy_network.apply(*params, observations)
-      dist = sac_networks.parametric_action_distribution.create_dist(logits)
-      pre_tanh = dist.loc + dist.scale * eta
-      return (
-          sac_networks.parametric_action_distribution.postprocess(pre_tanh),
-          {},
-      )
-
-    return policy
-
-  return make_correlated_policy
 
 
 def make_sac_networks(
