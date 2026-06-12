@@ -26,5 +26,6 @@ env:
   fast_model_rollout: true
 
 algorithm:
+  discounting: 0.99
   num_trials: 50
   target_entropy: -21
