@@ -8,7 +8,7 @@ env:
   env_name: humanoid
 
   control_interval: 5
-  reward_scale: 0.1
+  reward_scale: 1.0
   forward_reward_weight: 1.25
   ctrl_cost_weight: 0.1
   healthy_reward: 5.0
@@ -26,14 +26,5 @@ env:
   fast_model_rollout: true
 
 algorithm:
-  upper_quantile: 0.99
-  discounting: 0.99
   num_trials: 50
-  utd_ratio: 10
   target_entropy: -21
-  tune_entropy: True
-  real_steps_per_trial: 10000
-  num_real_train_envs: 10
-  episode_length: 1000
-  num_model_envs: 1000
-  model_subsampling: 1.0

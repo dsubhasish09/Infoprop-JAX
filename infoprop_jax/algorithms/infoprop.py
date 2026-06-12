@@ -162,6 +162,7 @@ def train(
     model_batch_size: int = 256,
     agent_batch_size: int = 256,
     num_trials: int = 1,
+    random_init: bool = True,
     normalize_observations: bool = False,
     reward_scaling: float = 1.0,
     tau: float = 0.005,
@@ -1231,13 +1232,19 @@ def train(
 
   jit_env_reset = jax.jit(env.reset)
 
-  # collect an initial dataset by running a random policy on the environment
-  logging.info('Collecting initial random physics dataset')
+  # collect an initial dataset before the first model fit
+  logging.info(
+      'Collecting initial physics dataset with %s actions',
+      'uniform random' if random_init else 'untrained policy',
+  )
   curr_env_key, local_key = jax.random.split(local_key)
   env_keys = jax.random.split(curr_env_key, num_real_envs)
   env_state = jit_env_reset(env_keys)
   prefill_key, local_key = jax.random.split(local_key)
-  training_state, env_state, buffer_state, physics_buffer_state = run_eval_and_collect_data(training_state, env_state, buffer_state, physics_buffer_state, prefill_key)
+  if random_init:
+    training_state, env_state, buffer_state, physics_buffer_state = run_eval_and_collect_random_data(training_state, env_state, buffer_state, physics_buffer_state, prefill_key)
+  else:
+    training_state, env_state, buffer_state, physics_buffer_state = run_eval_and_collect_data(training_state, env_state, buffer_state, physics_buffer_state, prefill_key)
   replay_size = replay_buffer_physics_state.size(physics_buffer_state)
   logging.info('physics replay size: %s', replay_size)
 
