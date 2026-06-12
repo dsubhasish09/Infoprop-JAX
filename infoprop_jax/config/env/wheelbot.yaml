@@ -34,3 +34,5 @@ env:
 
 # The algorithm defaults in algorithm/infoprop.yaml are wheelbot-tuned, so this
 # env forces nothing.
+algorithm:
+  discounting: 0.99
