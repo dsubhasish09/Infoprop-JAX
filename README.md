@@ -258,8 +258,7 @@ the model envs from real states and takes `model_steps_per_epoch` model env step
 SAC gradient updates per step. `random_init` controls how the very first dataset (before the first
 model fit) is collected: uniform random actions (`True`, default) or the untrained policy
 (`False`). `model_subsampling` sets the fraction of each step's transitions
-kept in the SAC replay buffer, and `keep_past_epoch` controls whether the buffer holds the whole
-trial or just the current epoch (buffer sizes are derived from these knobs). Network options
+kept in the SAC replay buffer, which holds one epoch's worth of data. Network options
 include `policy_network_layer_norm` and `q_network_layer_norm` (critic layer norm prevents
 unbounded Q-value growth on high-dimensional action spaces). Per-parameter details live as
 comments in the YAML itself.

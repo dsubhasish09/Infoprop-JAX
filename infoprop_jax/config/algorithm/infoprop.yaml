@@ -6,16 +6,15 @@ episode_length: 2000
 num_trials: 10                  # outer loop: collect -> train model -> train agent
 real_steps_per_trial: 10000     # real transitions collected each trial
 num_real_train_envs: 5
-physics_buffer_size: null     # optional; defaults to num_trials * real_steps_per_trial
+physics_buffer_size: 100000     # optional; defaults to num_trials * real_steps_per_trial
 random_init: True              # True: initial data uses uniform random actions; False: untrained policy
 
 # --- model rollouts (synthetic data) ---
 num_model_envs: 10000
 model_steps_per_epoch: 1000     # model env steps per agent-training epoch
 epochs_per_trial: 10            # env re-inits from real states per trial
-model_subsampling: 0.1          # fraction of each step's transitions kept in the buffer, (0, 1]
-keep_past_epoch: True           # buffer holds the whole trial (True) or one epoch (False);
-                                # size is derived: (epochs|1) * steps * round(frac * envs)
+model_subsampling: 0.1          # fraction of each step's transitions kept in the buffer, (0, 1];
+                                # buffer holds one epoch: steps * round(frac * envs)
 
 # --- agent training ---
 agent_learning_rate: 0.0003
@@ -33,7 +32,6 @@ tune_entropy: True
 # Entropy temperature: fixed value when tune_entropy=False, initial value when True.
 alpha: 0.1
 reset_agent_per_trial: False
-reset_model_replay_buffer: True
 reset_model_per_trial: False
 
 # model training config
