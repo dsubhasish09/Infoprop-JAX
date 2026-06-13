@@ -172,7 +172,6 @@ def train(
     epochs_per_trial: int = 10,
     model_steps_per_epoch: int = 100,
     model_subsampling: float = 1.0,
-    keep_past_epoch: bool = True,
     network_factory: types.NetworkFactory[
         sac_networks.SACNetworks
     ] = sac_networks.make_sac_networks,
@@ -196,7 +195,6 @@ def train(
     tune_entropy: bool = True,
     alpha: float = 0.1,
     reset_agent_per_trial: bool = False,
-    reset_model_replay_buffer: bool = False,
     reset_model_per_trial: bool = False,
 ):
   """Main Infoprop Dyna training loop.
@@ -242,17 +240,13 @@ def train(
 
   # Derived buffer sizes. Each model env step generates num_envs transitions of
   # which a fixed `kept_transitions_per_step` subset is inserted into the SAC
-  # replay buffer; the buffer is sized to hold exactly what one trial
-  # (keep_past_epoch=True) or one epoch (False) inserts, so these never drift
-  # apart when the rollout knobs change.
+  # replay buffer; the buffer is sized to hold exactly what one epoch inserts
+  # (older epochs are overwritten FIFO), so these never drift apart when the
+  # rollout knobs change.
   if not 0.0 < model_subsampling <= 1.0:
     raise ValueError(f'model_subsampling must be in (0, 1], got {model_subsampling}')
   kept_transitions_per_step = max(1, round(model_subsampling * num_envs))
-  max_model_replay_size = (
-      (epochs_per_trial if keep_past_epoch else 1)
-      * model_steps_per_epoch
-      * kept_transitions_per_step
-  )
+  max_model_replay_size = model_steps_per_epoch * kept_transitions_per_step
   if physics_buffer_size is None:
     physics_buffer_size = num_trials * real_steps_per_trial
   max_physics_replay_size = physics_buffer_size
@@ -1104,7 +1098,6 @@ def train(
     )
 
   _reset_model_params = jax.jit(_reset_model_params)
-  _reset_model_buffer = jax.jit(model_replay_buffer.init)
 
   def agent_training_step_with_resampling(
       training_state: TrainingState,
@@ -1227,8 +1220,7 @@ def train(
   # buffer states init
   buffer_state = replay_buffer.init(rb_key1)
   physics_buffer_state = replay_buffer_physics_state.init(rb_key2)
-  model_buffer_init_key = rb_key3
-  model_buffer_state = model_replay_buffer.init(model_buffer_init_key)
+  model_buffer_state = model_replay_buffer.init(rb_key3)
 
   jit_env_reset = jax.jit(env.reset)
 
@@ -1363,12 +1355,6 @@ def train(
         info.update(repeated)
         info['rng'] = env_keys
         init_model_env_states = init_model_env_states.replace(info=info)
-        # local_key, buf_reset_key = jax.random.split(local_key)
-        if reset_model_replay_buffer:
-            logging.info('Resetting model replay buffer...')
-            evolved_key = model_buffer_state.key
-            model_buffer_state = _reset_model_buffer(model_buffer_init_key)
-            model_buffer_state = model_buffer_state.replace(key=evolved_key)
 
         if reset_agent_per_trial:
             logging.info('Resetting agent parameters (policy, critic, alpha, target Q)...')
