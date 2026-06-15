@@ -13,8 +13,8 @@ from infoprop_jax.envs.wheelbot.trajectory import (
     points_to_line_segemnt,
 )
 
-# Nominal free-joint resting heights (humanoid torso / wheelbot body, from the MJCF models).
-HUMANOID_NOMINAL_Z = 1.282
+# Nominal half heights of the two robots, used for scaling the tracks.
+HUMANOID_NOMINAL_Z = 1.562 / 2
 WHEELBOT_NOMINAL_Z = 0.0645
 TRACK_SCALE = HUMANOID_NOMINAL_Z / WHEELBOT_NOMINAL_Z
 
