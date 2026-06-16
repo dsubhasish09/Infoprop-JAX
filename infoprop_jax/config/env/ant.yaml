@@ -13,7 +13,24 @@ env:
   act_history: 0
 
 algorithm:
-  discounting: 0.99
-  target_entropy: -8   # = -action_dim for ant
+  # Deployment config = best run from Optuna sweep ant_infoprop_v1 (study ant_infoprop_v1,
+  # trial 4, eval reward ~9.79k). These are t4's exact tuned hyperparameters. The seed is
+  # supplied per-launch (seed=$RANDOM in the jobscript), so each run uses a fresh random
+  # seed with this same config. num_trials (training length) kept at 50.
+  #   target_entropy = target_entropy_coef(-0.5) * action_dim(8) = -4.0
+  #   discounting     = 1 - one_minus_gamma(0.005)               = 0.995
   num_trials: 50
+  model_subsampling: 0.2
   upper_quantile: 0.99
+  agent_learning_rate: 0.001
+  utd_ratio: 10
+  tune_entropy: true
+  target_entropy: -4.0
+  model_learning_rate: 0.0005
+  model_weight_decay: 5e-06
+  patience: 5
+  agent_hidden_layer_sizes: [1024, 1024, 1024, 1024, 1024]
+  model_hidden_layer_sizes: [512, 512, 512, 512]
+  policy_network_layer_norm: true
+  model_layer_norm: false
+  discounting: 0.995
