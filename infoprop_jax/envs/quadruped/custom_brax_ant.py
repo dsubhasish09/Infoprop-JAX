@@ -191,6 +191,7 @@ class Ant(PipelineEnv):
   1. The episode duration reaches a 1000 timesteps
   2. The z-coordinate of the torso (index 0) is **not** in the range
      `[0.2, 1.0]`
+  3. The next projected torso roll exceeds 85 degrees in magnitude
   """
   # pyformat: enable
 
@@ -303,6 +304,11 @@ class Ant(PipelineEnv):
     obs = self._get_obs(pipeline_state)
     reward = forward_reward + healthy_reward - ctrl_cost - contact_cost
     done = 1.0 - is_healthy if self._terminate_when_unhealthy else 0.0
+    pos_offset = 0 if self._exclude_current_positions_from_observation else 2
+    roll = obs[2 + pos_offset]
+    roll_rate = obs[16 + pos_offset]
+    next_roll = roll + self.dt * roll_rate
+    done = jp.where(jp.abs(next_roll) > 85 * jp.pi / 180, 1.0, done)
     state.metrics.update(
         reward_forward=forward_reward,
         reward_survive=healthy_reward,

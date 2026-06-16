@@ -302,6 +302,10 @@ class HumanoidEnv(PipelineEnv, InfopropWrappable):
         done = jp.where(
             self._terminate_when_unhealthy, 1.0 - is_healthy, jp.array(0.0)
         )
+        roll = physics_state[1]
+        roll_rate = physics_state[4]
+        next_roll = roll + self.dt * roll_rate
+        done = jp.where(jp.abs(next_roll) > 85 * jp.pi / 180, 1.0, done)
         reward = self._reward_scale * (forward_reward + healthy_reward - ctrl_cost)
         reward_metrics = {
             "forward_reward": forward_reward,

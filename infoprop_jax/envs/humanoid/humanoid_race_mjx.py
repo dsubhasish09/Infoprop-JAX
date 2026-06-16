@@ -216,6 +216,10 @@ class HumanoidRaceEnv(HumanoidEnv):
         )
         off_track = jp.abs(cross_track_error) > track_width / 2
         done = jp.where(jp.logical_or(unhealthy, off_track), 1.0, 0.0)
+        roll = physics_state[1]
+        roll_rate = physics_state[4]
+        next_roll = roll + self.dt * roll_rate
+        done = jp.where(jp.abs(next_roll) > 85 * jp.pi / 180, 1.0, done)
         crash_penalty = jp.float32(self.crash_penalty)
 
         reward = self.rew_scale * (
