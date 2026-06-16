@@ -143,9 +143,6 @@ def main(cfg: omegaconf.DictConfig):
             'utd_ratio', train_cfg.get('grad_updates_per_model_step')),
         epochs_per_trial=train_cfg.get(
             'epochs_per_trial', train_cfg.get('num_resampling_epochs')),
-        model_steps_per_epoch=train_cfg.get(
-            'model_steps_per_epoch',
-            train_cfg.get('num_training_steps_per_model_train')),
         model_subsampling=train_cfg.get('model_subsampling', 1.0),
         model_learning_rate=train_cfg.model_learning_rate,
         model_weight_decay=train_cfg.model_weight_decay,

@@ -170,7 +170,6 @@ def train(
     physics_buffer_size: Optional[int] = None,
     utd_ratio: int = 1,
     epochs_per_trial: int = 10,
-    model_steps_per_epoch: int = 100,
     model_subsampling: float = 1.0,
     network_factory: types.NetworkFactory[
         sac_networks.SACNetworks
@@ -246,15 +245,15 @@ def train(
   if not 0.0 < model_subsampling <= 1.0:
     raise ValueError(f'model_subsampling must be in (0, 1], got {model_subsampling}')
   kept_transitions_per_step = max(1, round(model_subsampling * num_envs))
-  max_model_replay_size = model_steps_per_epoch * kept_transitions_per_step
+  max_model_replay_size = max_rollout_length * kept_transitions_per_step
   if physics_buffer_size is None:
     physics_buffer_size = num_trials * real_steps_per_trial
   max_physics_replay_size = physics_buffer_size
 
   # Sample reuse per epoch: SGD draws vs. transitions inserted. High reuse is
   # the critic-overestimation risk direction, so surface it loudly.
-  samples_drawn_per_epoch = agent_batch_size * utd_ratio * model_steps_per_epoch
-  replay_ratio = samples_drawn_per_epoch / (model_steps_per_epoch * kept_transitions_per_step)
+  samples_drawn_per_epoch = agent_batch_size * utd_ratio * max_rollout_length
+  replay_ratio = samples_drawn_per_epoch / (max_rollout_length * kept_transitions_per_step)
   logging.info(
       'model buffer size: %s (kept %s/%s transitions per step), replay ratio: %.1f',
       max_model_replay_size, kept_transitions_per_step, num_envs, replay_ratio,
@@ -370,7 +369,7 @@ def train(
   model_replay_buffer =  replay_buffers.UniformSamplingQueue(
       max_replay_size=max_model_replay_size // device_count,
       dummy_data_sample=dummy_transition,
-      sample_batch_size=agent_batch_size * utd_ratio * model_steps_per_epoch // device_count,
+      sample_batch_size=agent_batch_size * utd_ratio * max_rollout_length // device_count,
   )
   # real replay buffer
   replay_buffer = replay_buffers.UniformSamplingQueue(
@@ -1009,7 +1008,7 @@ def train(
     # Extract model params from the env state before the scan so they are
     # captured as a closure constant rather than carried as mutable loop state.
     # This prevents XLA from including ~34 MB of params in the scan carry for
-    # every one of the model_steps_per_epoch iterations.
+    # every one of the max_rollout_length iterations.
     _model_params = model_env_state.info['model']
     _lean_info = {k: v for k, v in model_env_state.info.items() if k != 'model'}
     _lean_env_state = model_env_state.replace(info=_lean_info)
@@ -1037,7 +1036,7 @@ def train(
         f,
         (training_state.normalizer_params, training_state.policy_params, _lean_env_state, model_buffer_state, experience_key),
         (),
-        length=model_steps_per_epoch,
+        length=max_rollout_length,
     )
     # Reattach model params so the returned state matches the caller's expectation.
     final_info = dict(_lean_env_state.info)
@@ -1053,7 +1052,7 @@ def train(
     # Change the front dimension of transitions so 'update_step' is called
     # grad_updates_per_step times by the scan.
     transitions = jax.tree_util.tree_map(
-        lambda x: jnp.reshape(x, (utd_ratio*model_steps_per_epoch, -1) + x.shape[1:]),
+        lambda x: jnp.reshape(x, (utd_ratio*max_rollout_length, -1) + x.shape[1:]),
         transitions,
     )
     (training_state, _), metrics = jax.lax.scan(
@@ -1159,7 +1158,7 @@ def train(
     epoch_training_time = time.time() - t
     training_walltime += epoch_training_time
     sps = (
-        env_steps_per_actor_step * model_steps_per_epoch
+        env_steps_per_actor_step * max_rollout_length
     ) / epoch_training_time
     metrics = {
         'training/sps': sps,
@@ -1388,7 +1387,7 @@ def train(
         logging.info('Eval Episode Reward: %s', metrics['eval/episode_reward'])
         logging.info('Eval Episode Reward Std: %s', metrics['eval/episode_reward_std'])
         logging.info('Eval Avg Episode Length: %s', metrics['eval/avg_episode_length'])
-        num_steps += epochs_per_trial * utd_ratio * model_steps_per_epoch
+        num_steps += epochs_per_trial * utd_ratio * max_rollout_length
         metrics['num_real_transitions'] = num_real_transitions
         progress_fn(num_steps, metrics)
 

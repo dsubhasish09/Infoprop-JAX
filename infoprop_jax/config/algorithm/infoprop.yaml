@@ -10,11 +10,15 @@ physics_buffer_size: 100000     # optional; defaults to num_trials * real_steps_
 random_init: True              # True: initial data uses uniform random actions; False: untrained policy
 
 # --- model rollouts (synthetic data) ---
-num_model_envs: 10000
-model_steps_per_epoch: 1000     # model env steps per agent-training epoch
+num_model_envs: 10000           # parallel model rollouts
+max_rollout_length: 1000        # model env steps per epoch; also the horizon scaling λ₂
 epochs_per_trial: 10            # env re-inits from real states per trial
+action_repeat: 1
 model_subsampling: 0.1          # fraction of each step's transitions kept in the buffer, (0, 1];
                                 # buffer holds one epoch: steps * round(frac * envs)
+# entropy-based rollout cutoffs
+lower_quantile: 0.01            # quantile of real-data entropy → λ₂ (accumulated cutoff)
+upper_quantile: 1.0             # quantile of real-data entropy → λ₁ (per-step cutoff)
 
 # --- agent training ---
 agent_learning_rate: 0.0003
@@ -43,12 +47,6 @@ model_layer_norm: False
 patience: 10            # model early stopping: epochs without val-loss improvement
 min_log_var: -10
 max_log_var: 0.5
-
-# rollout cutoffs
-max_rollout_length: 1000
-lower_quantile: 0.01    # quantile of real-data entropy → λ₂ (accumulated cutoff)
-upper_quantile: 1.0     # quantile of real-data entropy → λ₁ (per-step cutoff)
-action_repeat: 1
 
 # miscellaneous
 num_real_eval_envs: 1000
