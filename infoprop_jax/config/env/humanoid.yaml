@@ -26,26 +26,27 @@ env:
   fast_model_rollout: true
 
 algorithm:
-  # Deployment config = best-all-round run from Optuna sweep humanoid_infoprop_v1
-  # (study humanoid_infoprop_v1, trial 109, peak eval reward ~21.7k). Chosen over the
-  # nominal best t70 (~21.9k) for stability: t109 ends at its peak (100% retention) with
-  # a smoother eval curve. These are t109's exact tuned hyperparameters; the seed is
-  # supplied per-launch (seed=$RANDOM in the jobscript). num_trials (training length)
-  # kept at 50.
-  #   target_entropy = target_entropy_coef(0.0) * action_dim(17) = 0.0
-  #   discounting     = 1 - one_minus_gamma(0.03)                = 0.97
+  # --- data collection (real system) ---
   num_trials: 50
+
+  # --- model rollouts (synthetic data) ---
   model_subsampling: 0.1
   upper_quantile: 0.97
+
+  # --- agent training ---
   agent_learning_rate: 0.0002
+  agent_hidden_layer_sizes: [1024, 1024, 1024, 1024, 1024]
+  policy_network_layer_norm: true
   utd_ratio: 2
   tune_entropy: true
   target_entropy: 0.0
+
+  # --- model training ---
   model_learning_rate: 0.0005
   model_weight_decay: 2e-06
-  patience: 50
-  agent_hidden_layer_sizes: [1024, 1024, 1024, 1024, 1024]
   model_hidden_layer_sizes: [256, 256, 256]
-  policy_network_layer_norm: true
   model_layer_norm: false
+  patience: 50
+
+  # --- miscellaneous ---
   discounting: 0.97

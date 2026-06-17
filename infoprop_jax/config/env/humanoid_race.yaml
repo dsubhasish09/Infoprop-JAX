@@ -38,24 +38,27 @@ env:
   fast_model_rollout: true
 
 algorithm:
-  # Deployment config = best run from Optuna sweep v5 (study humanoid_race_infoprop_v5,
-  # trial 93, eval reward ~71.6k — beats the v1 58.5k and v3 64.2k bars). These are t93's
-  # exact tuned hyperparameters. The seed is supplied per-launch (seed=$RANDOM in
-  # jobscript_humanoid_race.sh), so each run uses a fresh random seed with this same config.
-  # num_trials (training length) kept at 50; max_rollout_length stays at its infoprop.yaml
-  # default (1000); physics_buffer_size / random_init / lower_quantile left at defaults.
+  # --- data collection (real system) ---
   num_trials: 50
+
+  # --- model rollouts (synthetic data) ---
   model_subsampling: 1.0
   upper_quantile: 0.999
+
+  # --- agent training ---
   agent_learning_rate: 0.001
+  agent_hidden_layer_sizes: [1024, 1024]
+  policy_network_layer_norm: true
   utd_ratio: 2
   tune_entropy: true
   target_entropy: 2.0
+
+  # --- model training ---
   model_learning_rate: 0.0005
   model_weight_decay: 5e-06
-  patience: 20
-  agent_hidden_layer_sizes: [1024, 1024]
   model_hidden_layer_sizes: [512, 512, 512]
-  policy_network_layer_norm: true
   model_layer_norm: false
+  patience: 20
+
+  # --- miscellaneous ---
   discounting: 0.99
