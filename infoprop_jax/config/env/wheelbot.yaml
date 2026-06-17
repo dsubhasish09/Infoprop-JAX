@@ -37,23 +37,23 @@ algorithm:
   num_trials: 10
 
   # --- model rollouts (synthetic data) ---
-  model_subsampling: 0.5
-  upper_quantile: 0.999
+  model_subsampling: 0.05
+  upper_quantile: 1.0
 
   # --- agent training ---
-  agent_learning_rate: 0.001
-  agent_hidden_layer_sizes: [512, 512]
-  policy_network_layer_norm: true
-  utd_ratio: 5
+  agent_learning_rate: 0.0001
+  agent_hidden_layer_sizes: [128, 128, 128, 128]
+  policy_network_layer_norm: false
+  utd_ratio: 10
   tune_entropy: true
   target_entropy: -2.0
 
   # --- model training ---
-  model_learning_rate: 0.0005
-  model_weight_decay: 5e-06
-  model_hidden_layer_sizes: [256, 256]
+  model_learning_rate: 0.0002
+  model_weight_decay: 5e-05
+  model_hidden_layer_sizes: [256, 256, 256]
   model_layer_norm: true
-  patience: 10
+  patience: 2
 
   # --- miscellaneous ---
   discounting: 0.99
