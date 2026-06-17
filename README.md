@@ -128,6 +128,26 @@ infoprop-jax/
    python -m infoprop_jax.envs.humanoid.humanoid_mjx
    ```
 
+### Hardware requirements
+
+Training requires an NVIDIA GPU with CUDA 12 support (the stack is pinned to `jax[cuda12]`).
+Compute capability ≥ 8.0 (Ampere) or newer is recommended; development used Hopper (H100) and
+Blackwell (RTX PRO 6000) cards.
+
+GPU memory depends on the environment and on `algorithm.num_model_envs` (default 10000).
+Approximate peak VRAM for the bundled examples:
+
+| Environment   | Peak VRAM |
+|---------------|-----------|
+| wheelbot      | ~12 GB    |
+| ant           | ~18 GB    |
+| humanoid_race | ~29 GB    |
+| humanoid      | ~35 GB    |
+
+- **Minimum:** 16 GB (runs wheelbot).
+- **Recommended:** 40 GB+ to run every bundled env (humanoid is the heaviest).
+- Lower `algorithm.num_model_envs` to reduce memory on smaller GPUs.
+
 ### Changing the JAX/CUDA stack
 The current pin is `jax[cuda12]==0.8.0` (see `pyproject.toml`). To change it, change only the
 direct requirement and let `uv` re-resolve:
