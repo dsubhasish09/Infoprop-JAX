@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 """Video evaluation for InfoProp Dyna checkpoints (Wheelbot).
 
-`run` dispatches on the checkpoint's training config: humanoid checkpoints are routed
-to `video_eval_humanoid.run`; everything else uses the Wheelbot flow below.
+`run` dispatches on the checkpoint's training config: humanoid checkpoints go to
+`video_eval_humanoid.run`, ant to `video_eval_ant.run`; everything else uses the Wheelbot flow below.
 
 Can be invoked in two ways:
 
@@ -154,6 +154,9 @@ def run(eval_cfg):
     # Dispatch on the checkpoint's environment.
     if env_cfg.get('env_name', '') in ('humanoid', 'humanoid_race'):
         from infoprop_jax.eval_scripts.video_eval_humanoid import run_loaded
+        return run_loaded(eval_cfg, log_dir, env_cfg, algo_cfg)
+    if env_cfg.get('env_name', '') == 'ant':
+        from infoprop_jax.eval_scripts.video_eval_ant import run_loaded
         return run_loaded(eval_cfg, log_dir, env_cfg, algo_cfg)
 
     from infoprop_jax.envs.wheelbot.wheelbot_brax_mjx import WheelbotEnv as RealWheelbot
