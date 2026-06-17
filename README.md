@@ -146,7 +146,6 @@ Approximate peak VRAM for the bundled examples:
 
 - **Minimum:** 16 GB (runs wheelbot).
 - **Recommended:** 40 GB+ to run every bundled env (humanoid is the heaviest).
-- Lower `algorithm.num_model_envs` to reduce memory on smaller GPUs.
 
 ### Changing the JAX/CUDA stack
 The current pin is `jax[cuda12]==0.8.0` (see `pyproject.toml`). To change it, change only the
