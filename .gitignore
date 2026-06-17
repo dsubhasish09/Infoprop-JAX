@@ -39,6 +39,9 @@ data_transfer_test/
 error_*
 core.*
 
+# SLURM launch scripts (cluster-specific, kept out of the repo)
+jobscript*.sh
+
 # Editor and local tool state
 .vscode/
 .idea/
