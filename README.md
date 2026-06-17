@@ -209,3 +209,10 @@ YAML comments.
 - **Brax**: Freeman et al., 2021 - https://github.com/google/brax
 - **MuJoCo MJX**: https://mujoco.readthedocs.io/en/stable/mjx.html
 - **SAC**: Haarnoja et al., 2018 - https://arxiv.org/abs/1812.05905
+
+---
+
+## Acknowledgements
+
+Aside from the core Infoprop pipeline, a substantial portion of the surrounding code and
+documentation was written with the help of AI coding tools, especially [Claude Code](https://claude.com/claude-code).
