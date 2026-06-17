@@ -24,18 +24,11 @@ update**, which separates:
 - **aleatoric** uncertainty (inherent noise - propagated), from
 - **epistemic** uncertainty (model disagreement - measured and used to *terminate* rollouts early).
 
-The training cycle alternates between:
-
-1. **Real data collection** - the current policy runs on the MJX simulator; transitions go into a
-   physics replay buffer.
-2. **Model training** - a probabilistic ensemble (`E = 8` members) is fit to the buffer by negative
-   log-likelihood; each member predicts a Gaussian over next-state deltas.
-3. **Cutoff computation** - the ensemble is evaluated on the buffer to derive rollout-termination
-   thresholds λ₁ (per-step) and λ₂ (accumulated) from the conditional entropy of the Kalman-filtered
-   estimate (paper eq. 12).
-4. **Policy training (SAC)** - many parallel imagined rollouts branch from real initial states.
-   Rollouts terminate when accumulated information loss exceeds λ₂, and the policy is updated
-   repeatedly on the synthetic transitions.
+Training alternates real-data collection on the MJX simulator, fitting a probabilistic ensemble to
+the buffer, deriving entropy-based rollout-termination thresholds (λ₁ per-step, λ₂ accumulated) from
+it, and SAC updates on many parallel imagined rollouts that branch from real states and stop when
+accumulated information loss exceeds the threshold. The per-step fusion / Kalman / entropy math and
+the thresholds are detailed in [`algorithms/README.md`](infoprop_jax/algorithms/README.md).
 
 > Frauenknecht et al., *On Rollouts in Model-Based Reinforcement Learning*, 2025 -
 > https://arxiv.org/abs/2501.16918
@@ -44,8 +37,7 @@ The training cycle alternates between:
 
 ## Architecture
 
-The code is organised so that **the Infoprop algorithm never mentions a specific robot**. The
-pieces:
+The code is organised so that **the Infoprop algorithm never mentions a specific robot**:
 
 ```
 InfopropWrappable                       ── the methods/attributes a new env must define
@@ -55,67 +47,27 @@ MyEnv(PipelineEnv, InfopropWrappable)   ── ONE class: real MJX physics + the
 InfopropEnv(brax Wrapper)               ── generic, written once: the fixed Infoprop core math
 ```
 
-- [`InfopropWrappable`](infoprop_jax/envs/infoprop_wrappable_env.py) - a small base class with no
-  Brax functionality of its own; it declares the env-specific methods Infoprop calls. A new
-  environment inherits from it together with `PipelineEnv` (own physics) or
-  `brax.envs.base.Wrapper` (building on an existing env).
-- A concrete env (e.g. [`WheelbotEnv`](infoprop_jax/envs/wheelbot/wheelbot_brax_mjx.py) or
-  [`HumanoidEnv`](infoprop_jax/envs/humanoid/humanoid_mjx.py)) - a single class playing **two
-  roles**: the ground-truth env for data collection / evaluation (via its real `step`), and the env
-  that `InfopropEnv` wraps for imagined rollouts (via the Infoprop methods). One
-  observation/reward/state layout serves both.
-- [`InfopropEnv`](infoprop_jax/envs/infoprop_env.py) - a generic Brax `Wrapper` holding **all the
-  fixed math** (ensemble fusion + Kalman update, conditional entropy, sampling, cutoffs,
-  ensemble-trainer setup). You never rewrite it; you construct it:
-  `InfopropEnv(MyEnv(cfg), min_log_var=…, max_log_var=…)`.
-- [`DefaultInfopropWrappable`](infoprop_jax/envs/default_wrappable.py) - a ready-made class that
-  makes any stock Brax env with a flat observation Infoprop-wrappable: model state == observation,
-  `context_size = 0`, with reward in imagined rollouts supplied as an obs-based
-  `reward_fn(obs, action, next_obs) -> (reward, done)`. See
-  [`envs/quadruped/ant.py`](infoprop_jax/envs/quadruped/ant.py) for the example.
-
-Because `InfopropEnv` is a `Wrapper`, it stacks uniformly with the Infoprop training wrappers in
-[`algorithms/util/custom_wrapper.py`](infoprop_jax/algorithms/util/custom_wrapper.py); the model
-rollout stack is:
+A concrete env (e.g. [`WheelbotEnv`](infoprop_jax/envs/wheelbot/wheelbot_brax_mjx.py)) plays **two
+roles** from one observation/reward/state layout: the ground-truth env for data collection /
+evaluation, and the env that [`InfopropEnv`](infoprop_jax/envs/infoprop_env.py) wraps for imagined
+rollouts. `InfopropEnv` is a generic Brax `Wrapper` holding **all the fixed math** (ensemble fusion +
+Kalman update, conditional entropy, sampling, cutoffs); you never rewrite it, you construct it:
+`InfopropEnv(MyEnv(cfg), min_log_var=…, max_log_var=…)`. Being a `Wrapper`, it stacks uniformly with
+the training wrappers in
+[`algorithms/util/custom_wrapper.py`](infoprop_jax/algorithms/util/custom_wrapper.py):
 
 ```
 CustomAutoResetWrapper → CustomEpisodeWrapper → VmapInfopropWrapper → InfopropEnv → MyEnv
 ```
 
-### One model step
+[`DefaultInfopropWrappable`](infoprop_jax/envs/default_wrappable.py) is a ready-made class for any
+stock Brax env with a flat observation (model state == observation, no context, obs-based reward);
+see [`envs/quadruped/ant.py`](infoprop_jax/envs/quadruped/ant.py).
 
-A single imagined step runs this pipeline (the env author writes only the `(env)` stages; the rest
-is fixed in `InfopropEnv`):
-
-```
-preprocess → NN forward → decode → augment_prediction → infoprop_core → postprocess
-   (env)    (InfopropEnv) (InfopropEnv)  (env, optional)  (InfopropEnv)      (env)
-```
-
-`decode` un-normalises the predicted delta and integrates it (`next = curr + delta·dt`);
-`infoprop_core` does precision-weighted fusion → Kalman gain → conditional variance → entropy →
-sampling. Both are fixed, parametrised only by `dt` and the running delta-normalisation statistics.
-
-### Three state vectors
-
-- **`model_state`** (`model_state_size`) - what the neural net predicts deltas of.
-- **`context`** (`context_size`) - extra dims you reconstruct *by integration* from the model_state
-  (typically world-frame odometry, as in the Wheelbot and Humanoid envs). **Set `context_size = 0`
-  if the NN predicts the entire next state** - then `augment_prediction` does nothing.
-- **`full_state`** = `model_state + context` (`full_state_size`) - the entropy/cutoff space.
-
-A **history window** (`obs_history`, `act_history`) handles partial observability: the NN input is
-the last `obs_history` model-states + `act_history` actions, assembled by `preprocess`.
-
-### Who manages which `info` keys
-
-- Keys **managed by the training code** keep fixed names and you never touch them: `model`
-  (ensemble params), `model_obs_mean/std`, `next_state_delta_mean/std`, `per_step_cutoff`,
-  `accumulated_cutoff`, `binning_entropy`, `accumulated/current_conditional_entropy`, `rng`,
-  episode bookkeeping.
-- **Your environment's own** keys (the model-state, history, context, task id) are named freely;
-  only your env's methods read or write them. Two small declarations let the generic wrappers
-  carry/reset them without knowing the names (see below).
+The one model step (`preprocess → NN → decode → augment_prediction → infoprop_core → postprocess`),
+the three state vectors (`model_state` / `context` / `full_state`), the history window, and which
+`info` keys belong to the training code versus your env are all documented in
+[`infoprop_jax/envs/README.md`](infoprop_jax/envs/README.md).
 
 ---
 
@@ -147,9 +99,9 @@ infoprop-jax/
 │   ├── eval_scripts/
 │   │   ├── video_eval.py                # Render real vs. model rollouts for a checkpoint
 │   │   ├── video_eval_humanoid.py       # Humanoid/humanoid-race rendering variant
+│   │   ├── video_eval_ant.py            # Ant variant: real video + model rollout (no model video)
 │   │   └── eval_utils.py                # Shared checkpoint-evaluation helpers
-│   └── config/                          # Hydra configs (main / algorithm / env / eval)
-├── jobscript*.sh                        # SLURM launch scripts (train / video eval)
+│   └── config/                          # Hydra configs (main / algorithm / env / eval) + README
 ├── pyproject.toml                       # Direct dependencies
 └── uv.lock                              # Resolved lockfile
 ```
@@ -207,12 +159,12 @@ Select the environment with `env=` (default: `wheelbot`, per `config/main.yaml`)
 ```bash
 python -m infoprop_jax.main env=humanoid        # also: humanoid_race, ant
 ```
-Each name is looked up in the `ENV_REGISTRY` dictionary in
-[`infoprop_jax/envs/__init__.py`](infoprop_jax/envs/__init__.py) via the `env_name` key of the
-matching `config/env/<name>.yaml`.
+See [`infoprop_jax/config/README.md`](infoprop_jax/config/README.md) for config composition, the
+training schedule, and how `env=` resolves to a class.
 
-Render a checkpoint (real vs. model rollout; humanoid checkpoints are routed automatically to
-`video_eval_humanoid.py`):
+Render a checkpoint (real vs. model rollout; humanoid and ant checkpoints are routed automatically
+to `video_eval_humanoid.py` / `video_eval_ant.py`, the latter rendering only the real rollout since
+default-wrapped envs have no model `pipeline_state`):
 ```bash
 python -m infoprop_jax.main video_eval=true eval.log_dir=exp/<run_dir> eval.iteration=<N>
 ```
@@ -241,27 +193,12 @@ a pointed error instead of an opaque scan/vmap trace.
 
 ## Configuration
 
-Hydra configs compose under `infoprop_jax/config/`:
-
-- `config/main.yaml` - composition + run metadata (seed, experiment, W&B project, output paths).
-- `config/algorithm/infoprop.yaml` - model, SAC, rollout, and training hyperparameters.
-- `config/env/wheelbot.yaml` - Wheelbot control, reward, history, and noise settings.
-- `config/env/humanoid.yaml` - MJX tutorial Humanoid reward, reset, and history settings.
-- `config/env/humanoid_race.yaml` - Humanoid racing reward, trajectory, and reset settings.
-- `config/env/ant.yaml` - stock Brax ant via `DefaultInfopropWrappable`.
-- `config/eval/video_eval.yaml` - checkpoint/track/output settings for rendering.
-
-The training schedule in `config/algorithm/infoprop.yaml` is hierarchical - trials → epochs →
-steps. Each of the `num_trials` outer iterations collects `real_steps_per_trial` real transitions,
-refits the ensemble, and runs `epochs_per_trial` agent-training epochs; every epoch re-initialises
-the model envs from real states and takes `model_steps_per_epoch` model env steps, with `utd_ratio`
-SAC gradient updates per step. `random_init` controls how the very first dataset (before the first
-model fit) is collected: uniform random actions (`True`, default) or the untrained policy
-(`False`). `model_subsampling` sets the fraction of each step's transitions
-kept in the SAC replay buffer, which holds one epoch's worth of data. Network options
-include `policy_network_layer_norm` and `q_network_layer_norm` (critic layer norm prevents
-unbounded Q-value growth on high-dimensional action spaces). Per-parameter details live as
-comments in the YAML itself.
+[Hydra](https://hydra.cc/) configs compose under [`infoprop_jax/config/`](infoprop_jax/config/):
+`main.yaml` sets the defaults and run metadata; `algorithm/infoprop.yaml` holds the hyperparameters;
+one `env/<name>.yaml` per environment; `eval/video_eval.yaml` for rendering. Composition order, the
+trials → epochs → steps schedule, and CLI override examples are in
+[`infoprop_jax/config/README.md`](infoprop_jax/config/README.md); per-parameter detail lives in the
+YAML comments.
 
 ---
 

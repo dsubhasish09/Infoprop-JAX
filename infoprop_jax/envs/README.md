@@ -122,23 +122,31 @@ wrapper's own methods would silently take precedence; subclass that env instead.
 
 Example: the ant (`quadruped/ant.py`, config `../config/env/ant.yaml`).
 
+Note: stock Brax envs store orientation as a quaternion, but the model predicts a next state by
+integrating a delta (`next = curr + delta·dt`), which does not work on the quaternion manifold. So
+the ant re-expresses orientation as Euler angles (`custom_brax_ant.py`). This reintroduces gimbal
+singularities, guarded here by terminating when the projected roll exceeds 85°.
+
 **1. Write an observation-based reward function.** In imagined rollouts there is no physics
 `pipeline_state`, so the stock reward logic cannot run. Supply a pure-jax, per-sample
 `reward_fn(obs, action, next_obs) -> (reward, done)` (it runs inside the vmapped model step):
 
 ```python
 def ant_reward(obs, action, next_obs):
-  """Obs-based proxy of the Brax 'ant' reward (default flags: positions excluded
-  from obs, no contact cost).
+  """Obs-based proxy of the custom 'ant' reward (default flags: positions
+  excluded from obs, no contact cost).
 
-  Obs layout: [z, quat(4), joint qpos(8), qvel(14)] = 27; x-velocity ~= qvel[0]
-  = next_obs[13]. Healthy iff z in [0.2, 1.0]; reward = forward velocity +
-  healthy bonus (1.0) - ctrl cost (0.5 * ||a||^2). The usual deviation (same
-  proxy MBPO uses): velocity is read from the generalized velocity instead of
-  Brax's torso-COM finite difference, so model-rollout rewards differ slightly
-  in scale from the real-env eval reward.
+  Obs layout: [z, yaw/roll/pitch(3), joint qpos(8), body-frame vel(3),
+  euler rates(3), joint qvel(8)] = 26. The torso velocity at next_obs[12:15]
+  is in the body frame, so it is rotated back to world frame to recover the
+  forward (world-x) velocity. Healthy iff z in [0.2, 1.0]; reward = forward
+  velocity + healthy bonus (1.0) - ctrl cost (0.5 * ||a||^2). The usual
+  deviation (same proxy MBPO uses): velocity is read from the generalized
+  velocity instead of Brax's torso-COM finite difference, so model-rollout
+  rewards differ slightly in scale from the real-env eval reward.
   """
-  x_velocity = next_obs[13]
+  yaw, roll, pitch = next_obs[1], next_obs[2], next_obs[3]
+  x_velocity = (_yrp(yaw, roll, pitch) @ next_obs[12:15])[0]
   z = next_obs[0]
   is_healthy = jp.where(z < 0.2, 0.0, 1.0)
   is_healthy = jp.where(z > 1.0, 0.0, is_healthy)
