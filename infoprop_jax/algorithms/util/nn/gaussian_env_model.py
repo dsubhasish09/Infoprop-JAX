@@ -7,6 +7,8 @@ a Gaussian distribution over next-state deltas:
 
 All E members share the same MLP architecture but are trained independently
 (different parameter initialisations; the training loop uses separate dataset batches).
+Trunk *and* output heads are per-member: every parameter carries a leading ensemble
+axis, so one member's loss has zero gradient w.r.t. any other member's weights.
 """
 from typing import Optional, Sequence
 
@@ -15,6 +17,34 @@ import jax
 import jax.numpy as jnp
 
 from .mlp import MLP
+
+
+class _Member(nn.Module):
+    """One ensemble member: MLP trunk plus its own mean and log-variance heads.
+
+    Vmapped as a unit by GaussianEnsembleModel so the heads get an ensemble axis
+    too — a head created outside the vmap would be a single tensor shared by all
+    members, coupling their predictions through a common output map.
+    """
+
+    hidden_dims: int
+    num_layers: int
+    output_dim: int
+    dropout_rate: Optional[float] = None
+    add_weight_norm: bool = False
+    model_layer_norm: bool = True
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray, training: bool = False):
+        features = MLP(
+            [self.hidden_dims] * (self.num_layers - 1),
+            activations=nn.silu,
+            activate_final=True,
+            dropout_rate=self.dropout_rate,
+            add_weight_norm=self.add_weight_norm,
+            layer_norm=self.model_layer_norm,
+        )(x, training)
+        return nn.Dense(self.output_dim)(features), nn.Dense(self.output_dim)(features)
 
 
 class GaussianEnsembleModel(nn.Module):
@@ -65,36 +95,31 @@ class GaussianEnsembleModel(nn.Module):
             means:   (num_ensemble, batch_size, output_dim) — predicted next-state deltas.
             logvars: (num_ensemble, batch_size, output_dim) — log-variance of predictions.
         """
-        layers = [self.hidden_dims] * (self.num_layers - 1)
         state = jnp.concatenate([observations, action], axis=-1)
         if len(state.shape) < 2 or state.shape[-2] != self.num_ensemble:
             state = jnp.expand_dims(state, axis=-2).repeat(self.num_ensemble, axis=-2)
         # Normalise input: (obs - mean) / (std + eps)
         state_inp = (state - mean) / (std + 1e-6)
-        # Vmap applies one MLP forward pass per ensemble member in parallel
-        outputs = nn.vmap(
-            MLP,
+        # Vmap runs one member (trunk + both heads) per ensemble index in parallel
+        means, logvar = nn.vmap(
+            _Member,
             variable_axes={"params": 0},
             split_rngs={"params": True},
             in_axes=(-2, None),
             out_axes=-2,
             axis_size=self.num_ensemble,
         )(
-            layers,
-            activations=nn.silu,
-            activate_final=True,
+            self.hidden_dims,
+            self.num_layers,
+            self.output_dim,
             dropout_rate=self.dropout_rate,
             add_weight_norm=self.add_weight_norm,
-            layer_norm=self.model_layer_norm,
+            model_layer_norm=self.model_layer_norm,
         )(
             state_inp, training
         )
 
-        means = nn.Dense(self.output_dim)(outputs)
-
-        # Separate head for log-variance; clipped to [log_min, log_max]
-        logvar = nn.Dense(self.output_dim)(outputs)
-
+        # Log-variance clipped to [log_min, log_max]
         logvar = self.log_max - nn.softplus(self.log_max - logvar)
         logvar = self.log_min + nn.softplus(logvar - self.log_min)
         return means, logvar
